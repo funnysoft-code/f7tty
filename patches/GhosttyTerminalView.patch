@@ -1,0 +1,23 @@
+diff --git a/Sources/GhosttyKitExports/GhosttyTerminalView.swift b/Sources/GhosttyKitExports/GhosttyTerminalView.swift
+index c87a80a3da73bb6e53df776d3afbfe87f4688d1b..dcaf847487498b6731de210235ae803fef9c124e 100644
+--- a/Sources/GhosttyKitExports/GhosttyTerminalView.swift
++++ b/Sources/GhosttyKitExports/GhosttyTerminalView.swift
+@@ -221,7 +221,8 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     }
+ 
+     public override func updateLayer() {
+-        requestRender()
++        pendingRenderRequest = true
++        renderIfNeeded()
+     }
+ 
+     public override func layout() {
+@@ -399,8 +400,6 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     public func requestRender() {
+         pendingRenderRequest = true
+         needsDisplay = true
+-        layer?.setNeedsDisplay()
+-        renderIfNeeded()
+     }
+ 
+     public func applyCursor(for shape: ghostty_action_mouse_shape_e) {
