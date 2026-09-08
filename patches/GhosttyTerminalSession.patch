@@ -1,0 +1,136 @@
+diff --git a/Sources/GhosttyKitExports/GhosttyTerminalSession.swift b/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
+index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4ed672dec5 100644
+--- a/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
++++ b/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
+@@ -206,14 +206,19 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+     private var sessions: [ObjectIdentifier: WeakGhosttyTerminalSession] = [:]
+     nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
+ 
+-    public init(loadDefaultTheme: Bool = true) throws {
++    private let configFile: String?
++    private let loadDefaultTheme: Bool
++
++    public init(loadDefaultTheme: Bool = true, configFile: String? = nil) throws {
++        self.configFile = configFile
++        self.loadDefaultTheme = loadDefaultTheme
+         let argc = UInt(CommandLine.argc)
+         let argv = CommandLine.unsafeArgv
+         guard ghostty_init(argc, argv) == 0 else {
+             throw GhosttyTerminalHostError.initializationFailed
+         }
+ 
+-        guard let config = Self.loadConfig(loadDefaultTheme: loadDefaultTheme) else {
++        guard let config = Self.loadConfig(loadDefaultTheme: loadDefaultTheme, configFile: configFile) else {
+             throw GhosttyTerminalHostError.configurationFailed
+         }
+ 
+@@ -277,7 +282,7 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+     }
+ 
+     public func reloadConfig() {
+-        guard let newConfig = Self.loadConfig(loadDefaultTheme: true) else { return }
++        guard let newConfig = Self.loadConfig(loadDefaultTheme: loadDefaultTheme, configFile: configFile) else { return }
+         let oldConfig = config
+         config = newConfig
+         configDiagnostics = Self.collectDiagnostics(from: newConfig)
+@@ -293,6 +298,10 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+     }
+ 
+     public func openConfig() {
++        if let configFile {
++            NSWorkspace.shared.open(URL(fileURLWithPath: configFile))
++            return
++        }
+         let path = ghostty_config_open_path()
+         defer { ghostty_string_free(path) }
+         guard let pointer = path.ptr, path.len > 0 else { return }
+@@ -330,8 +339,13 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+         ghostty_app_set_focus(app, focused)
+     }
+ 
+-    private static func loadConfig(loadDefaultTheme: Bool) -> ghostty_config_t? {
++    private static func loadConfig(loadDefaultTheme: Bool, configFile: String?) -> ghostty_config_t? {
+         guard let config = ghostty_config_new() else { return nil }
++        if let configFile {
++            configFile.withCString { ghostty_config_load_file(config, $0) }
++            ghostty_config_finalize(config)
++            return config
++        }
+         ghostty_config_load_default_files(config)
+         ghostty_config_load_recursive_files(config)
+         if loadDefaultTheme, ghosttyConfigDeclaresTheme() == false, let overrideURL = try? GhosttyDefaultTheme.ensureOverride() {
+@@ -366,6 +380,8 @@ public final class GhosttyTerminalSession {
+     public var notificationHandler: ((GhosttyTerminalNotification) -> Void)?
+     public var requestHandler: ((GhosttyTerminalRequest) -> Void)?
+     nonisolated(unsafe) private var secureEventInputEnabled = false
++    private var closed = false
++    private var lastPixelSize: CGSize = .zero
+ 
+     public init(
+         host: any GhosttyTerminalHostProtocol = GhosttyTerminalHost.shared ?? (try! GhosttyTerminalHost()),
+@@ -394,6 +410,7 @@ public final class GhosttyTerminalSession {
+     }
+ 
+     public func attach(to view: GhosttyTerminalView) {
++        guard !closed else { return }
+         self.view = view
+         if view.handlers == nil {
+             view.handlers = makeViewHandlers()
+@@ -449,7 +466,10 @@ public final class GhosttyTerminalSession {
+         guard let surface else { return }
+         guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
+         let scale = view?.window?.backingScaleFactor ?? view?.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+-        ghostty_surface_set_size(surface, UInt32(ceil(size.width * scale)), UInt32(ceil(size.height * scale)))
++        let pixels = CGSize(width: ceil(size.width * scale), height: ceil(size.height * scale))
++        guard pixels != lastPixelSize else { return }
++        lastPixelSize = pixels
++        ghostty_surface_set_size(surface, UInt32(pixels.width), UInt32(pixels.height))
+         ghostty_surface_refresh(surface)
+     }
+ 
+@@ -461,10 +481,31 @@ public final class GhosttyTerminalSession {
+     }
+ 
+     public func render() {
+-        guard let surface else { return }
++        guard let surface, let view, !view.isHiddenOrHasHiddenAncestor,
++              view.window?.occlusionState.contains(.visible) == true else { return }
+         ghostty_surface_draw(surface)
+     }
+ 
++    public func close() {
++        guard !closed else { return }
++        closed = true
++        view?.handlers = nil
++        view = nil
++        closeHandler = nil
++        actionHandler = nil
++        requestHandler = nil
++        notificationHandler = nil
++        if secureEventInputEnabled {
++            DisableSecureEventInput()
++            secureEventInputEnabled = false
++        }
++        if let oldSurface = surface {
++            surface = nil
++            ghostty_surface_free(oldSurface)
++        }
++        host.unregister(self)
++    }
++
+     public func requestRender() {
+         if let view {
+             view.requestRender()
+@@ -966,10 +1007,11 @@ private func ghosttyKitAction(_ app: ghostty_app_t?, _ target: ghostty_target_s,
+     guard let app else { return false }
+     guard let host = ghosttyKitHost(from: ghostty_app_userdata(app)) else { return false }
+     let terminalAction = ghosttyTerminalAction(from: action)
++    let session = target.tag == GHOSTTY_TARGET_SURFACE ? ghosttyKitSession(for: target.target.surface) : nil
+     Task { @MainActor in
+         switch target.tag {
+         case GHOSTTY_TARGET_SURFACE:
+-            if let session = ghosttyKitSession(for: target.target.surface) {
++            if let session, session.surface != nil {
+                 _ = session.handle(action: terminalAction)
+             }
+         case GHOSTTY_TARGET_APP:
