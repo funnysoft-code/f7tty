@@ -9,7 +9,17 @@ python3 build-app.py
 open dist/F7TTY.app
 ```
 
-Requires Apple Silicon, macOS 14+, and Xcode. No install or notarization. The built app is ad-hoc signed.
+Requires Apple Silicon, macOS 14+, and Xcode. The built app is ad-hoc signed, without notarization.
+
+To build and install a single copy in `/Applications`:
+
+```sh
+python3 install-app.py
+```
+
+The installer removes old F7TTY app bundles from `dist`, builds and verifies a fresh app, replaces `/Applications/F7TTY.app`, and removes duplicate F7TTY installations from `/Applications` and `~/Applications`, including nested folders. It then removes the fresh app bundle from `dist`. Screenshots, measurements, saved workspaces and preferences are retained. The current installed app stays in place if the build fails. Running terminals stay open; quit and reopen F7TTY to load the update. The script needs write access to the installation folders.
+
+Use `python3 install-app.py --dry-run` to list its actions without changing files. App symlinks are left untouched, and a symlink at the installation destination blocks replacement.
 
 Python 3 and Git are required. The first build clones `https://github.com/briannadoubt/GhosttyKit.git`, checks out `f3756807a61a42dba3dc1d866a1fd865f1ddfe21`, and applies the two wrapper patches in `patches/`. This requires network access. Later builds validate the revision, origin and exact patch diff locally before invoking Swift. The checkout and build output are ignored by Git.
 
@@ -30,7 +40,7 @@ Run `python3 dependency-bootstrap.py` to prepare or validate the dependency with
 - Drag pane headers to an edge to nest a split, or the center to swap panes. Native drag cancellation leaves the model unchanged.
 - Drag split dividers to resize. Header menus close individual panes or sessions.
 - Sidebar: select a session; others remain alive but hidden. Right-click to rename or remove workspaces and sessions.
-- Drag folders relative to folders, or sessions relative to sessions, to reorder. Cross-folder session moves preserve the session directory, pane identities and selection. The insertion line previews the destination; the saved order also determines Command-1 through Command-9.
+- Drag folders relative to folders, or sessions relative to sessions, to reorder. Drop a session onto another workspace's folder row to append it, including empty or collapsed workspaces. The folder highlights during the drag and expands after the move. You can also right-click a session and choose **Move to Workspace**. Cross-folder session moves preserve running shells, split layouts, the session directory, pane identities and selection. The insertion line previews relative reordering; the saved order also determines Command-1 through Command-9.
 - The toolbar bell shows recent explicit terminal bells, terminal notifications and exit events. It does not infer agent activity from output or idle shells. The in-memory history is bounded to 50 events, initially showing six with an action to browse the full scrollable history or clear it. Events whose terminals have closed remain readable but cannot be activated.
 - Red close and Command-Q: confirmation, then terminate current app descendants and free terminal surfaces.
 - Command-W closes only the focused terminal pane, with the same close confirmation. The Window menu also provides native minimize and zoom actions.
@@ -63,6 +73,7 @@ Appearance mode now propagates to existing and newly created Ghostty surfaces th
 
 ```sh
 python3 dependency-bootstrap.py
+PYTHONDONTWRITEBYTECODE=1 python3 Scripts/test-install-app.py
 swift test
 swift build -c release --product F7TTY
 .build/release/F7TTY --smoke-test
