@@ -461,7 +461,7 @@ final class Pane {
     ) {
         self.terminalID = terminalID
         session = host.makeSession(configuration: .init(
-            command: test ? "/bin/zsh -f" : nil,
+            command: PerformanceDiagnostics.benchmark ? Self.benchmarkCommand : (test ? "/bin/zsh -f" : nil),
             workingDirectory: directory,
             environment: ["F7TTY": test ? "SMOKE" : "1"],
             fontSize: 13,
@@ -474,11 +474,11 @@ final class Pane {
         container.wantsLayer = true
         // Terminal configuration is independently dark; keep its chrome legible.
         container.appearance = NSAppearance(named: .darkAqua)
-        container.layer?.backgroundColor = charcoal.cgColor
-        container.layer?.cornerRadius = 9
+        container.layer?.backgroundColor = NSColor.black.cgColor
+        container.layer?.cornerRadius = PerformanceDiagnostics.experiment("F7TTY_SQUARE_PANES") ? 0 : 9
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(white: 0.2, alpha: 1).cgColor
-        container.layer?.masksToBounds = true
+        container.layer?.masksToBounds = !PerformanceDiagnostics.experiment("F7TTY_SQUARE_PANES")
 
         title.font = .systemFont(ofSize: 11)
         title.textColor = .secondaryLabelColor
@@ -517,10 +517,10 @@ final class Pane {
             headerStack.trailingAnchor.constraint(equalTo: header.trailingAnchor),
             headerStack.topAnchor.constraint(equalTo: header.topAnchor),
             headerStack.bottomAnchor.constraint(equalTo: header.bottomAnchor),
-            terminal.topAnchor.constraint(equalTo: header.bottomAnchor, constant: 2),
-            terminal.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 1),
-            terminal.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -1),
-            terminal.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -1)
+            terminal.topAnchor.constraint(equalTo: header.bottomAnchor),
+            terminal.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            terminal.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            terminal.bottomAnchor.constraint(equalTo: container.bottomAnchor)
         ])
 
         container.dropHandler = { draggedID, targetID, zone in
@@ -549,9 +549,12 @@ final class Pane {
                 // Shell titles commonly prefix the path with user@host. Keep
                 // the complete value in the tooltip without crowding controls.
                 let parts = value.components(separatedBy: ":")
-                self.title.stringValue = parts.count == 2 && parts[0].contains("@") ? parts[1] : value
-                self.title.toolTip = value
-                self.onTitleChanged?()
+                let displayTitle = parts.count == 2 && parts[0].contains("@") ? parts[1] : value
+                if self.title.toolTip != value { self.title.toolTip = value }
+                if self.title.stringValue != displayTitle {
+                    self.title.stringValue = displayTitle
+                    self.onTitleChanged?()
+                }
             }
         }
         session.requestHandler = { request in
@@ -582,10 +585,18 @@ final class Pane {
     var onTitleChanged: (() -> Void)?
     var onActivity: ((GhosttyTerminalAction) -> Void)?
 
+    private static var benchmarkCommand: String {
+        let script = Assets.bundle.url(forResource: "render-workload", withExtension: "py", subdirectory: "Resources")!.path
+        let quotedPath = "'" + script.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let scenario = ProcessInfo.processInfo.environment["F7TTY_BENCHMARK_SCENARIO"] ?? "animate"
+        return "/usr/bin/python3 \(quotedPath) \(scenario == "idle" ? "idle" : scenario == "titles" ? "titles" : "animate")"
+    }
+
     func visibility(_ visible: Bool) {
+        let changed = container.isHidden == visible
         container.isHidden = !visible
         session.setOccluded(!visible)
-        if visible {
+        if visible && changed {
             terminal.requestRender()
         }
     }
@@ -604,7 +615,10 @@ final class Pane {
                 bar.leadingAnchor.constraint(greaterThanOrEqualTo: container.leadingAnchor, constant: 10),
                 width
             ])
-            bar.onQuery = { [weak self] query in _ = self?.session.perform(action: "search:\(query)") }
+            bar.onQuery = { [weak self] query in
+                PerformanceDiagnostics.record("searchRequests")
+                _ = self?.session.perform(action: "search:\(query)")
+            }
             bar.onNavigate = { [weak self] next in self?.navigateSearch(next: next) }
             bar.onClose = { [weak self] in
                 _ = self?.session.perform(action: "end_search")
@@ -618,11 +632,13 @@ final class Pane {
     }
 
     func navigateSearch(next: Bool) {
+        searchBar?.flushPendingQuery()
         _ = session.perform(action: next ? "navigate_search:next" : "navigate_search:previous")
     }
 
     private func hideSearch() {
         guard let searchBar else { return }
+        searchBar.cancelPendingQuery()
         let restoreFocus = searchBar.ownsKeyboardFocus && !container.isHiddenOrHasHiddenAncestor
         searchBar.removeFromSuperview()
         self.searchBar = nil
@@ -783,27 +799,34 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     var window: NSWindow!
     var host: GhosttyTerminalHost!
     var model = WorkspaceState(workspaces: [])
-    var persistence: WorkspacePersistence?
+    private var saveScheduler: WorkspaceSaveScheduler?
     var panes: [UUID: Pane] = [:]
     var paneTreeView: PaneTreeView?
     var focusedTerminalID: UUID?
     var sidebarVisible = true
     var quitting = false
     let test = CommandLine.arguments.contains("--smoke-test")
-    let preview = CommandLine.arguments.contains("--ui-preview")
+    let preview = CommandLine.arguments.contains("--ui-preview") || CommandLine.arguments.contains("--empty-preview") || CommandLine.arguments.contains("--benchmark")
     var smokeFailed = false
-    private var rootView = NSView()
+    private var rootView = AppearancePanel()
+    private var backgroundBlur: NSVisualEffectView?
     private let body = WorkspaceSplitView()
     private let sidebar = AppearancePanel()
     private let sidebarRows = NSStackView()
+    private var automaticTitleRows: [UUID: (row: SidebarRowButton, resolveTitle: (String?) -> String)] = [:]
     private let canvas = AppearancePanel()
-    private let emptyState = NSStackView()
+    private let emptyState = AppearancePanel()
+    private var emptyLeadingConstraint: NSLayoutConstraint?
+    private var emptyTopConstraint: NSLayoutConstraint?
     private var sidebarWidthConstraint: NSLayoutConstraint?
     private var persistenceErrorShown = false
     private var invalidSavedStateError: Error?
     private var settingsView: AppearanceSettingsView?
     private var commandPalette: CommandPaletteView?
     private var settingsTopConstraint: NSLayoutConstraint?
+    private var paneLeadingConstraint: NSLayoutConstraint?
+    private var paneTopConstraint: NSLayoutConstraint?
+    private var visibleTerminalIDs = Set<UUID>()
     private var collapsedWorkspaceIDs = Set<UUID>()
     private var backgroundOpacity: Double = 1
     private var appearanceMode = "dark"
@@ -811,6 +834,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var activityPopover: NSPopover?
     private var activityController: TerminalActivityViewController?
     private var activityButton: ActionButton?
+    private var benchmarkFinishSignal: DispatchSourceSignal?
+    private var benchmarkInitialCounts: [String: Int] = [:]
+    private var benchmarkStartTime: TimeInterval = 0
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if let index = CommandLine.arguments.firstIndex(of: "--export-icon"), CommandLine.arguments.count > index + 1 {
@@ -869,13 +895,14 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         if test {
             runSmokeTest()
+        } else if PerformanceDiagnostics.benchmark {
+            runBenchmark()
         }
     }
 
     private func loadSavedModel() {
         guard let fileURL = WorkspacePersistence.applicationSupportURL() else { return }
         let store = WorkspacePersistence(fileURL: fileURL)
-        persistence = store
         switch store.load() {
         case .missing:
             model = WorkspaceState(workspaces: [])
@@ -884,6 +911,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         case .invalid(let error):
             model = WorkspaceState(workspaces: [])
             invalidSavedStateError = error
+        }
+        saveScheduler = WorkspaceSaveScheduler(persistence: store) { [weak self] error in
+            self?.presentPersistenceError(error)
         }
     }
 
@@ -925,14 +955,6 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
         configureSidebar()
         configureCanvas()
-        let blur = NSVisualEffectView(frame: rootView.bounds)
-        blur.autoresizingMask = [.width, .height]
-        blur.material = .underWindowBackground
-        blur.blendingMode = .behindWindow
-        blur.state = .active
-        rootView.addSubview(blur, positioned: .below, relativeTo: body)
-        window.isOpaque = false
-        window.backgroundColor = .clear
         backgroundOpacity = test || preview ? 1 : UserDefaults.standard.object(forKey: "backgroundOpacity") as? Double ?? 1
         applyBackgroundOpacity(backgroundOpacity)
         let toggle = ActionButton("Toggle sidebar", symbol: "sidebar.left") { [weak self] in self?.toggleSidebar() }
@@ -1020,43 +1042,68 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func configureCanvas() {
         canvas.wantsLayer = true
         canvas.layer?.backgroundColor = NSColor(red: 0.064, green: 0.068, blue: 0.072, alpha: 1).cgColor
-        emptyState.orientation = .vertical
-        emptyState.alignment = .centerX
-        emptyState.spacing = 12
+        emptyState.darkFill = NSColor(white: 0.105, alpha: 1)
+        emptyState.lightFill = NSColor(white: 0.97, alpha: 1)
+        emptyState.updateColors()
+        emptyState.layer?.cornerRadius = 9
+        emptyState.layer?.borderWidth = 1
+        emptyState.layer?.borderColor = NSColor(white: 0.23, alpha: 1).cgColor
         emptyState.translatesAutoresizingMaskIntoConstraints = false
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .centerX
+        stack.spacing = 12
+        stack.translatesAutoresizingMaskIntoConstraints = false
         let mark = NSImageView(image: Brand.image())
         mark.imageScaling = .scaleProportionallyUpOrDown
         mark.translatesAutoresizingMaskIntoConstraints = false
         let message = NSTextField(labelWithString: "No session selected")
-        message.font = .systemFont(ofSize: 15, weight: .medium)
-        message.textColor = NSColor(white: 0.7, alpha: 1)
-        let action = ActionButton("New terminal", action: { [weak self] in self?.newSession() })
-        action.contentTintColor = NSColor(white: 0.65, alpha: 1)
-        emptyState.addArrangedSubview(mark)
-        emptyState.addArrangedSubview(message)
-        emptyState.addArrangedSubview(action)
+        message.font = .systemFont(ofSize: 14, weight: .medium)
+        message.textColor = .secondaryLabelColor
+        let guidance = NSTextField(wrappingLabelWithString: "Pick a session in the sidebar, or hit + on a project")
+        guidance.font = .systemFont(ofSize: 12)
+        guidance.textColor = .tertiaryLabelColor
+        guidance.alignment = .center
+        let version = NSTextField(labelWithString: "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3")")
+        version.font = .systemFont(ofSize: 11, weight: .medium)
+        version.textColor = .tertiaryLabelColor
+        [mark, message, guidance, version].forEach { stack.addArrangedSubview($0) }
+        stack.setCustomSpacing(20, after: guidance)
+        emptyState.addSubview(stack)
         canvas.addSubview(emptyState)
+        emptyLeadingConstraint = emptyState.leadingAnchor.constraint(equalTo: canvas.leadingAnchor)
+        emptyTopConstraint = emptyState.topAnchor.constraint(equalTo: canvas.topAnchor, constant: 8)
         NSLayoutConstraint.activate([
-            mark.widthAnchor.constraint(equalToConstant: 58),
-            mark.heightAnchor.constraint(equalToConstant: 58),
-            emptyState.centerXAnchor.constraint(equalTo: canvas.centerXAnchor),
-            emptyState.centerYAnchor.constraint(equalTo: canvas.centerYAnchor, constant: 16)
+            emptyLeadingConstraint!,
+            emptyTopConstraint!,
+            emptyState.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
+            emptyState.bottomAnchor.constraint(equalTo: canvas.bottomAnchor, constant: -8),
+            mark.widthAnchor.constraint(equalToConstant: 64),
+            mark.heightAnchor.constraint(equalToConstant: 64),
+            stack.leadingAnchor.constraint(equalTo: emptyState.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: emptyState.trailingAnchor, constant: -24),
+            stack.centerYAnchor.constraint(equalTo: emptyState.centerYAnchor),
+            guidance.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
     }
 
     private func makeSmokeModel() {
         let workspace = Workspace(name: "Smoke", directory: FileManager.default.homeDirectoryForCurrentUser.path)
         model = WorkspaceState(workspaces: [workspace], selectedWorkspaceID: workspace.id)
-        _ = addSession(to: workspace.id, name: "Terminal", select: true, persist: false)
+        guard !CommandLine.arguments.contains("--empty-preview") else { return }
+        _ = addSession(to: workspace.id, name: PerformanceDiagnostics.benchmark ? nil : "Terminal", select: true, persist: false)
     }
 
     private func refreshSidebar() {
+        PerformanceDiagnostics.record("sidebarRebuilds")
         let color = selectedWorkspace?.appColor.flatMap(WorkspaceColor.init(rawValue:)) ?? .standard
-        for panel in [sidebar, canvas] {
+        for panel in [rootView, sidebar, canvas] {
             panel.darkFill = color.darkFill
             panel.lightFill = color.lightFill
             panel.updateColors()
         }
+        if window.isOpaque { window.backgroundColor = rootView.layer?.backgroundColor.flatMap(NSColor.init(cgColor:)) ?? .windowBackgroundColor }
+        automaticTitleRows.removeAll(keepingCapacity: true)
         for view in sidebarRows.arrangedSubviews {
             sidebarRows.removeArrangedSubview(view)
             view.removeFromSuperview()
@@ -1121,7 +1168,11 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             }
             for session in workspace.sessions {
                 let row = SidebarRowButton(frame: .zero)
-                row.title = session.displayTitle(liveTitle: session.terminalIDs.first.flatMap { panes[$0]?.title.stringValue })
+                let firstID = session.terminalIDs.first
+                if session.usesAutomaticTitle, let firstID {
+                    automaticTitleRows[firstID] = (row, session.displayTitle(liveTitle:))
+                }
+                row.title = session.displayTitle(liveTitle: firstID.flatMap { panes[$0]?.title.stringValue })
                 row.sessionRow = true
                 if let index = numberedSessions.firstIndex(of: session.id) { row.shortcutLabel = "⌘\(index + 1)" }
                 row.selectedRow = session.id == model.selectedSessionID
@@ -1160,6 +1211,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func renderSelectedSession() {
+        PerformanceDiagnostics.record("layoutRebuilds")
         // Reparent and lay out in one transaction. Do not animate live Metal
         // surfaces through intermediate sizes or expose an empty frame.
         CATransaction.begin()
@@ -1168,10 +1220,14 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             canvas.layoutSubtreeIfNeeded()
             CATransaction.commit()
         }
-        for pane in panes.values {
+        for id in visibleTerminalIDs {
+            guard let pane = panes[id] else { continue }
             pane.visibility(false)
             pane.container.removeFromSuperview()
         }
+        visibleTerminalIDs.removeAll(keepingCapacity: true)
+        paneLeadingConstraint = nil
+        paneTopConstraint = nil
         paneTreeView?.removeFromSuperview()
         paneTreeView = nil
 
@@ -1189,22 +1245,18 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         for id in session.terminalIDs { panes[id]?.updateZoomState(session.zoomedTerminalID == id) }
 
         if let zoomedID = session.zoomedTerminalID, let pane = panes[zoomedID] {
-            addPaneToCanvas(pane)
+            addPaneContentToCanvas(pane.container)
             pane.visibility(true)
+            visibleTerminalIDs.insert(zoomedID)
         } else {
             let tree = PaneTreeView(node: session.tree, panes: panes, path: []) { [weak self] path, ratio in
                 self?.updateRatio(for: session.id, path: path, ratio: ratio)
             }
             paneTreeView = tree
-            canvas.addSubview(tree)
-            NSLayoutConstraint.activate([
-                tree.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: sidebarVisible ? 0 : 8),
-                tree.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
-                tree.topAnchor.constraint(equalTo: canvas.topAnchor, constant: sidebarVisible ? 8 : 38),
-                tree.bottomAnchor.constraint(equalTo: canvas.bottomAnchor, constant: -8)
-            ])
+            addPaneContentToCanvas(tree)
             for id in session.terminalIDs {
                 panes[id]?.visibility(true)
+                visibleTerminalIDs.insert(id)
             }
         }
 
@@ -1218,14 +1270,16 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
-    private func addPaneToCanvas(_ pane: Pane) {
-        pane.container.translatesAutoresizingMaskIntoConstraints = false
-        canvas.addSubview(pane.container)
+    private func addPaneContentToCanvas(_ view: NSView) {
+        view.translatesAutoresizingMaskIntoConstraints = false
+        canvas.addSubview(view)
+        paneLeadingConstraint = view.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: sidebarVisible ? 0 : 8)
+        paneTopConstraint = view.topAnchor.constraint(equalTo: canvas.topAnchor, constant: sidebarVisible ? 8 : 38)
         NSLayoutConstraint.activate([
-            pane.container.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: sidebarVisible ? 0 : 8),
-            pane.container.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
-            pane.container.topAnchor.constraint(equalTo: canvas.topAnchor, constant: sidebarVisible ? 8 : 38),
-            pane.container.bottomAnchor.constraint(equalTo: canvas.bottomAnchor, constant: -8)
+            paneLeadingConstraint!,
+            view.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
+            paneTopConstraint!,
+            view.bottomAnchor.constraint(equalTo: canvas.bottomAnchor, constant: -8)
         ])
     }
 
@@ -1249,15 +1303,20 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             )
             panes[terminalID]?.onTitleChanged = { [weak self] in
                 guard let self, self.settingsView == nil,
-                      self.model.workspaces.flatMap(\.sessions).contains(where: { $0.usesAutomaticTitle && $0.terminalIDs.first == terminalID }) else { return }
-                self.refreshSidebar()
+                      let automaticTitle = self.automaticTitleRows[terminalID],
+                      let rawTitle = self.panes[terminalID]?.title.stringValue else { return }
+                let row = automaticTitle.row
+                let title = automaticTitle.resolveTitle(rawTitle)
+                guard row.title != title else { return }
+                row.title = title
+                PerformanceDiagnostics.record("sidebarTitleUpdates")
             }
             panes[terminalID]?.session.applyColorScheme(colorScheme(for: appearanceMode), appearance: window?.effectiveAppearance)
             panes[terminalID]?.onActivity = { [weak self] action in
                 guard let self, let event = TerminalActivity.event(action, terminalID: terminalID) else { return }
                 self.activity.insert(event, at: 0)
                 self.activity = Array(self.activity.prefix(50))
-                self.activityController?.events = self.activity
+                if self.activityPopover?.isShown == true { self.activityController?.events = self.activity }
                 self.activityButton?.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Recent activity")
             }
             panes[terminalID]?.session.closeHandler = { [weak self] processAlive in
@@ -1332,7 +1391,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func updateRatio(for sessionID: UUID, path: [Int], ratio: Double) {
         guard mutateSession(sessionID, { $0.setRatio(at: path, to: ratio) }) else { return }
-        saveModel()
+        saveModel(delay: 0.2)
     }
 
     private func newSession() {
@@ -1394,8 +1453,6 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         model.workspaces.append(workspace)
         model.selectedWorkspaceID = workspace.id
         _ = addSession(to: workspace.id, name: nil, select: true, persist: true)
-        refreshSidebar()
-        renderSelectedSession()
     }
 
     private func selectWorkspace(_ id: UUID) {
@@ -1634,7 +1691,10 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         sidebarWidthConstraint?.isActive = sidebarVisible
         body.adjustSubviews()
         settingsTopConstraint?.constant = sidebarVisible ? 8 : 38
-        renderSelectedSession()
+        paneLeadingConstraint?.constant = sidebarVisible ? 0 : 8
+        paneTopConstraint?.constant = sidebarVisible ? 8 : 38
+        emptyLeadingConstraint?.constant = sidebarVisible ? 0 : 8
+        emptyTopConstraint?.constant = sidebarVisible ? 8 : 38
     }
 
     private func showPaneMenu(for terminalID: UUID) {
@@ -1659,13 +1719,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return item
     }
 
-    private func saveModel() {
-        guard !test && !preview, let persistence else { return }
-        do {
-            try persistence.save(model)
-        } catch {
-            presentPersistenceError(error)
-        }
+    private func saveModel(delay: TimeInterval = 0) {
+        guard !test && !preview else { return }
+        saveScheduler?.submit(model, delay: delay)
     }
 
     private func presentPersistenceError(_ error: Error) {
@@ -1681,9 +1737,17 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         return false
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        do {
+            try saveScheduler?.flush()
+        } catch {
+            presentPersistenceError(error)
+        }
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateNow }
-        if !test && !panes.isEmpty {
+        if !test && !PerformanceDiagnostics.benchmark && !panes.isEmpty {
             let alert = NSAlert()
             alert.messageText = "Quit F7TTY and stop all terminals?"
             alert.informativeText = "Commands and jobs in these terminals will be terminated. Unsaved work may be lost."
@@ -1991,6 +2055,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func closeSettings() {
+        guard settingsView != nil else { return }
         settingsView?.removeFromSuperview()
         settingsView = nil
         settingsTopConstraint = nil
@@ -2048,8 +2113,24 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     }
 
     private func applyBackgroundOpacity(_ value: Double) {
-        backgroundOpacity = min(1, max(0, value))
-        rootView.layer?.backgroundColor = NSColor.clear.cgColor
+        backgroundOpacity = value.isFinite ? min(1, max(0, value)) : 1
+        let translucent = backgroundOpacity < 1 || PerformanceDiagnostics.experiment("F7TTY_LEGACY_COMPOSITION")
+        if translucent && backgroundBlur == nil {
+            let blur = NSVisualEffectView(frame: rootView.bounds)
+            blur.autoresizingMask = [.width, .height]
+            blur.material = .underWindowBackground
+            blur.blendingMode = .behindWindow
+            blur.state = .active
+            rootView.addSubview(blur, positioned: .below, relativeTo: body)
+            backgroundBlur = blur
+        } else if !translucent {
+            backgroundBlur?.removeFromSuperview()
+            backgroundBlur = nil
+        }
+        window.isOpaque = !translucent
+        rootView.fillOpacity = translucent ? 0 : 1
+        rootView.updateColors()
+        window.backgroundColor = translucent ? .clear : (rootView.layer?.backgroundColor.flatMap(NSColor.init(cgColor:)) ?? .windowBackgroundColor)
         sidebar.fillOpacity = backgroundOpacity
         canvas.fillOpacity = backgroundOpacity
         if !test && !preview { UserDefaults.standard.set(backgroundOpacity, forKey: "backgroundOpacity") }
@@ -2130,8 +2211,84 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self, let firstPane = self.panes[firstID] else { return }
+            let frame = firstPane.terminal.frame
+            let flushEdges = abs(frame.minX) < 0.5 && abs(frame.minY) < 0.5
+                && abs(frame.maxX - firstPane.container.bounds.width) < 0.5
+                && abs(frame.maxY - firstPane.header.frame.minY) < 0.5
+                && firstPane.container.layer?.backgroundColor == NSColor.black.cgColor
+            self.smokeFailed = self.smokeFailed || !flushEdges
+            print("SMOKE black terminal panel has flush content edges \(flushEdges ? "PASS" : "FAIL")")
+            self.applyBackgroundOpacity(0.7)
+            let translucent = !self.window.isOpaque && self.backgroundBlur != nil && self.rootView.fillOpacity == 0
+            self.captureSmokeWindow("translucent")
+            self.applyBackgroundOpacity(1)
+            let opaque = self.window.isOpaque && self.backgroundBlur == nil && self.rootView.isOpaque
+            self.smokeFailed = self.smokeFailed || !translucent || !opaque
+            print("SMOKE opacity transitions \(translucent && opaque ? "PASS" : "FAIL")")
+            self.appearanceMode = "light"
+            self.applyAppearanceMode()
+            self.rootView.updateColors()
+            let lightFill = NSColor(cgColor: self.rootView.layer!.backgroundColor!)!.usingColorSpace(.deviceRGB)!
+            self.appearanceMode = "dark"
+            self.applyAppearanceMode()
+            self.rootView.updateColors()
+            let darkFill = NSColor(cgColor: self.rootView.layer!.backgroundColor!)!.usingColorSpace(.deviceRGB)!
+            let appearancePass = lightFill.redComponent > 0.8 && darkFill.redComponent < 0.2
+                && lightFill.alphaComponent == 1 && darkFill.alphaComponent == 1
+            self.smokeFailed = self.smokeFailed || !appearancePass
+            print("SMOKE opaque root follows appearance \(appearancePass ? "PASS" : "FAIL")")
+            let tree = self.paneTreeView
+            let terminalParent = firstPane.container.superview
+            self.toggleSidebar()
+            self.toggleSidebar()
+            let stableSidebar = self.paneTreeView === tree && firstPane.container.superview === terminalParent
+                && self.window.firstResponder === firstPane.terminal
+            self.smokeFailed = self.smokeFailed || !stableSidebar
+            print("SMOKE sidebar toggle keeps layout and focus \(stableSidebar ? "PASS" : "FAIL")")
+            _ = self.mutateSession(firstSession.id) { $0.usesAutomaticTitle = true; return true }
+            self.refreshSidebar()
+            let row = self.automaticTitleRows[firstID]?.row
+            firstPane.session.handle(action: .setTitle("  Efficient terminal  "))
+            firstPane.session.handle(action: .setTitle("  Efficient terminal  "))
+            let stableTitle = self.automaticTitleRows[firstID]?.row === row && row?.title == "Efficient terminal"
+            self.smokeFailed = self.smokeFailed || !stableTitle
+            print("SMOKE title update preserves sidebar row \(stableTitle ? "PASS" : "FAIL")")
+            firstPane.session.handle(action: .setTitle("test@host: "))
+            let fallbackTitle = self.selectedSession?.displayTitle(liveTitle: nil)
+            let fallbackPass = self.automaticTitleRows[firstID]?.row === row && row?.title == fallbackTitle
+            self.smokeFailed = self.smokeFailed || !fallbackPass
+            print("SMOKE automatic title fallback \(fallbackPass ? "PASS" : "FAIL")")
+            let queryProbe = TerminalSearchBar()
+            var submittedQueries: [String] = []
+            queryProbe.onQuery = { submittedQueries.append($0) }
+            for query in ["a", "abc", "abc", "x"] {
+                queryProbe.field.stringValue = query
+                queryProbe.controlTextDidChange(Notification(name: NSControl.textDidChangeNotification))
+            }
+            queryProbe.cancelPendingQuery()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                let passed = submittedQueries == ["abc"]
+                self.smokeFailed = self.smokeFailed || !passed
+                print("SMOKE search deduplicates and cancels stale queries \(passed ? "PASS" : "FAIL")")
+                _ = queryProbe
+            }
             self.captureSmokeWindow("single")
-            firstPane.session.insertText("printf 'F7TTY_%s\\n\\a' SMOKE_OK")
+            let replacement = NSRange(location: NSNotFound, length: 0)
+            firstPane.terminal.unmarkText()
+            firstPane.terminal.setMarkedText("にほん", selectedRange: NSRange(location: 3, length: 0), replacementRange: replacement)
+            let compositionStarted = firstPane.terminal.hasMarkedText()
+            firstPane.terminal.unmarkText()
+            firstPane.terminal.unmarkText()
+            firstPane.terminal.setMarkedText("printf", selectedRange: NSRange(location: 6, length: 0), replacementRange: replacement)
+            firstPane.terminal.insertText("printf 'F7TTY_%s\\n\\a' SMOKE_OK", replacementRange: replacement)
+            let compositionPass = compositionStarted && !firstPane.terminal.hasMarkedText()
+            self.smokeFailed = self.smokeFailed || !compositionPass
+            print("SMOKE composition cancel and commit \(compositionPass ? "PASS" : "FAIL")")
+            firstPane.terminal.layer?.contentsScale = self.window.backingScaleFactor + 1
+            firstPane.terminal.viewDidChangeBackingProperties()
+            let scalePass = firstPane.terminal.layer?.contentsScale == self.window.backingScaleFactor
+            self.smokeFailed = self.smokeFailed || !scalePass
+            print("SMOKE backing layer scale repair \(scalePass ? "PASS" : "FAIL")")
             let enter = NSEvent.keyEvent(
                 with: .keyDown,
                 location: .zero,
@@ -2153,7 +2310,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 guard let self, let outputPane = self.panes[firstID] else { return }
                 _ = outputPane.session.perform(action: "select_all")
                 let outputPassed = outputPane.session.copySelection()?.contains("F7TTY_SMOKE_OK") == true
-                self.smokeFailed = !outputPassed
+                self.smokeFailed = self.smokeFailed || !outputPassed
                 print(outputPassed ? "SMOKE terminal output PASS" : "SMOKE terminal output FAIL")
                 let activityPassed = self.activity.contains { $0.terminalID == firstID && $0.title == "Terminal bell" }
                 self.smokeFailed = self.smokeFailed || !activityPassed
@@ -2286,6 +2443,73 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         }
     }
 
+    private func benchmarkCounts() -> [String: Int] {
+        var counts = PerformanceDiagnostics.counts
+        for snapshot in [host.profilingSnapshot()] + panes.values.flatMap({ [$0.session.profilingSnapshot(), $0.terminal.profilingSnapshot()] }) {
+            counts.merge(snapshot, uniquingKeysWith: +)
+        }
+        return counts
+    }
+
+    /// SIGUSR1 finishes only this disposable benchmark process. No polling timer
+    /// or diagnostic output runs in the measured interval.
+    private func runBenchmark() {
+        guard let path = ProcessInfo.processInfo.environment["F7TTY_BENCHMARK_REPORT"] else {
+            NSApp.terminate(nil)
+            return
+        }
+        if let screen = window.screen ?? NSScreen.main { window.setFrame(screen.visibleFrame, display: true) }
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        benchmarkFinishSignal = source
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            var measured = self.benchmarkCounts()
+            for (key, value) in self.benchmarkInitialCounts { measured[key, default: 0] -= value }
+            let pane = self.selectedSession?.terminalIDs.first.flatMap { self.panes[$0] }
+            let size = pane?.session.surface.map { ghostty_surface_size($0) }
+            let report: [String: Any] = [
+                "seconds": ProcessInfo.processInfo.systemUptime - self.benchmarkStartTime,
+                "counters": measured,
+                "windowOpaque": self.window.isOpaque,
+                "blurAttached": self.backgroundBlur != nil,
+                "paneClipped": pane?.container.layer?.masksToBounds ?? false,
+                "surfaceWidth": pane?.terminal.bounds.width ?? 0,
+                "surfaceHeight": pane?.terminal.bounds.height ?? 0,
+                "columns": size?.columns ?? 0,
+                "rows": size?.rows ?? 0,
+                "pixelWidth": size?.width_px ?? 0,
+                "pixelHeight": size?.height_px ?? 0,
+                "cellWidth": size?.cell_width_px ?? 0,
+                "cellHeight": size?.cell_height_px ?? 0,
+                "title": pane?.title.stringValue ?? "",
+                "backingScale": self.window.backingScaleFactor,
+                "rendererLayer": pane?.terminal.layer.map { String(describing: type(of: $0)) } ?? "none"
+            ]
+            do {
+                let data = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
+                try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            } catch { fputs("Benchmark report failed: \(error)\n", stderr) }
+            NSApp.terminate(nil)
+        }
+        source.resume()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+            guard let self else { return }
+            self.benchmarkInitialCounts = self.benchmarkCounts()
+            self.benchmarkStartTime = ProcessInfo.processInfo.systemUptime
+            let ready: [String: Any] = ["pid": ProcessInfo.processInfo.processIdentifier, "windowID": self.window.windowNumber]
+            do {
+                let data = try JSONSerialization.data(withJSONObject: ready)
+                try data.write(to: URL(fileURLWithPath: path + ".ready"), options: .atomic)
+            } catch { fputs("Benchmark readiness failed: \(error)\n", stderr); NSApp.terminate(nil) }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 120) { [weak self] in
+            guard let self, !self.quitting else { return }
+            fputs("Benchmark timed out\n", stderr)
+            NSApp.terminate(nil)
+        }
+    }
+
     private func finishSmokeTest() {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in
             guard let self else { return }
@@ -2323,6 +2547,19 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 self.showActivity()
                 return
             }
+            while self.selectedSession != nil { self.closeFocusedSession() }
+            self.window.setContentSize(NSSize(width: 650, height: 400))
+            self.window.contentView?.layoutSubtreeIfNeeded()
+            let emptyPass = !self.emptyState.isHidden && self.paneTreeView == nil && self.panes.isEmpty
+                && !self.model.workspaces.isEmpty && self.model.workspaces.allSatisfy { $0.sessions.isEmpty }
+                && self.emptyState.bounds.width > 200 && self.emptyState.bounds.height > 300
+            self.toggleSidebar()
+            self.window.contentView?.layoutSubtreeIfNeeded()
+            let emptyMargins = balancedMargins(self.emptyState)
+            self.toggleSidebar()
+            self.smokeFailed = self.smokeFailed || !emptyPass || !emptyMargins
+            print("SMOKE closing all sessions keeps framed empty workspace \(emptyPass && emptyMargins ? "PASS" : "FAIL")")
+            self.captureSmokeWindow("empty-workspace")
             NSApp.terminate(self)
         }
     }

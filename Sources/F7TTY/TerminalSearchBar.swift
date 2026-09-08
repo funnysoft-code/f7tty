@@ -7,6 +7,8 @@ final class TerminalSearchBar: NSView, NSTextFieldDelegate {
     var onQuery: ((String) -> Void)?
     var onNavigate: ((Bool) -> Void)?
     var onClose: (() -> Void)?
+    private var pendingQuery: DispatchWorkItem?
+    private var submittedQuery: String?
 
     var ownsKeyboardFocus: Bool {
         guard let responder = window?.firstResponder else { return false }
@@ -65,7 +67,38 @@ final class TerminalSearchBar: NSView, NSTextFieldDelegate {
         count.stringValue = field.stringValue.isEmpty ? "" : "\(selected.map { $0 + 1 } ?? 0)/\(max(0, total))"
     }
 
-    func controlTextDidChange(_ obj: Notification) { onQuery?(field.stringValue) }
+    func controlTextDidChange(_ obj: Notification) {
+        pendingQuery?.cancel()
+        let query = field.stringValue
+        guard query != submittedQuery else { return }
+        if query.isEmpty || query.count >= 3 {
+            submitQuery(query)
+        } else {
+            let work = DispatchWorkItem { [weak self] in
+                guard let self, self.field.stringValue == query else { return }
+                self.submitQuery(query)
+            }
+            pendingQuery = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
+        }
+    }
+
+    func cancelPendingQuery() {
+        pendingQuery?.cancel()
+        pendingQuery = nil
+    }
+
+    func flushPendingQuery() {
+        cancelPendingQuery()
+        submitQuery(field.stringValue)
+    }
+
+    private func submitQuery(_ query: String) {
+        guard submittedQuery != query else { return }
+        submittedQuery = query
+        pendingQuery = nil
+        onQuery?(query)
+    }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
@@ -73,6 +106,7 @@ final class TerminalSearchBar: NSView, NSTextFieldDelegate {
             return true
         }
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
+            flushPendingQuery()
             onNavigate?(!NSEvent.modifierFlags.contains(.shift))
             return true
         }

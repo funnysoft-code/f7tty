@@ -1,23 +1,70 @@
 diff --git a/Sources/GhosttyKitExports/GhosttyTerminalView.swift b/Sources/GhosttyKitExports/GhosttyTerminalView.swift
-index c87a80a3da73bb6e53df776d3afbfe87f4688d1b..dcaf847487498b6731de210235ae803fef9c124e 100644
+index c87a80a3da73bb6e53df776d3afbfe87f4688d1b..e1755985c6747b1c276590c142ff6474ea7fce39 100644
 --- a/Sources/GhosttyKitExports/GhosttyTerminalView.swift
 +++ b/Sources/GhosttyKitExports/GhosttyTerminalView.swift
-@@ -221,7 +221,8 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+@@ -137,6 +137,7 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     private var keyTextAccumulator: [String]?
+     private var pendingRenderRequest = false
+     private var isRendering = false
++    private var profile = GhosttyTerminalProfileCounters()
+     private var observedWindow: NSWindow?
+     private var cursorHidden = false
+     nonisolated(unsafe) private var windowObservers: [NSObjectProtocol] = []
+@@ -208,6 +209,9 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     public override func viewDidChangeBackingProperties() {
+         super.viewDidChangeBackingProperties()
+         handlers?.updateContentScale()
++        // A backing-scale change also changes pixel dimensions without a layout.
++        // Always forward the size; the session deduplicates effective pixel sizes.
++        handlers?.resize(bounds.size)
+         handlers?.displayChanged(currentDisplayID())
+     }
+ 
+@@ -221,7 +225,9 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
      }
  
      public override func updateLayer() {
 -        requestRender()
++        profile.record(.viewUpdateLayerCalls)
 +        pendingRenderRequest = true
 +        renderIfNeeded()
      }
  
      public override func layout() {
-@@ -399,8 +400,6 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+@@ -361,11 +367,17 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     public func setMarkedText(_ string: Any, selectedRange: NSRange, replacementRange: NSRange) {
+         let text = Self.plainString(from: string) ?? ""
+         markedText = NSMutableAttributedString(string: text)
++        profile.record(.viewPreeditUpdates)
+         handlers?.markedTextChanged(text.isEmpty ? nil : text)
+     }
+ 
+     public func unmarkText() {
+-        markedText = NSMutableAttributedString()
++        guard hasMarkedText() else {
++            profile.record(.viewUnmarkNoops)
++            return
++        }
++        markedText.mutableString.setString("")
++        profile.record(.viewPreeditClears)
+         handlers?.markedTextChanged(nil)
+     }
+ 
+@@ -397,10 +409,15 @@ public final class GhosttyTerminalView: NSView, @preconcurrency NSTextInputClien
+     }
+ 
      public func requestRender() {
++        profile.record(.viewRenderRequests)
          pendingRenderRequest = true
          needsDisplay = true
 -        layer?.setNeedsDisplay()
 -        renderIfNeeded()
++    }
++
++    /// Lifetime counts for this view only. Empty unless launched with
++    /// F7TTY_PROFILE=1. Missing keys are zero; reading does not reset counts.
++    public func profilingSnapshot() -> [String: Int] {
++        profile.snapshot
      }
  
      public func applyCursor(for shape: ghostty_action_mouse_shape_e) {

@@ -1,9 +1,65 @@
 diff --git a/Sources/GhosttyKitExports/GhosttyTerminalSession.swift b/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
-index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4ed672dec5 100644
+index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..a000c726ffa8d5453c55ad17a29032ed12e8e846 100644
 --- a/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
 +++ b/Sources/GhosttyKitExports/GhosttyTerminalSession.swift
-@@ -206,14 +206,19 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+@@ -1,5 +1,52 @@
+ import AppKit
+ import Carbon
++import QuartzCore
++
++/// Fixed keys and saturating counts keep profiling storage bounded. The launch
++/// environment is read once; disabled profiling never populates the dictionary.
++@MainActor
++struct GhosttyTerminalProfileCounters {
++    enum Counter: String {
++        case hostTicks = "host_ticks"
++        case viewRenderRequests = "view_render_requests"
++        case viewUpdateLayerCalls = "view_update_layer_calls"
++        case viewPreeditUpdates = "view_preedit_updates"
++        case viewPreeditClears = "view_preedit_clears"
++        case viewUnmarkNoops = "view_unmark_noops"
++        case sessionRenderRequests = "session_render_requests"
++        case surfaceDrawCalls = "surface_draw_calls"
++        case asyncRenderRefreshes = "async_render_refreshes"
++        case effectiveResizes = "effective_resizes"
++        case resizeNoops = "resize_noops"
++        case contentScaleChanges = "content_scale_changes"
++        case contentScaleNoops = "content_scale_noops"
++        case layerScaleChanges = "layer_scale_changes"
++        case colorSchemeChanges = "color_scheme_changes"
++        case colorSchemeNoops = "color_scheme_noops"
++        case focusCalls = "focus_calls"
++        case focusNoops = "focus_noops"
++        case occlusionChanges = "occlusion_changes"
++        case occlusionNoops = "occlusion_noops"
++        case inputRefreshes = "input_refreshes"
++        case keyDownRefreshes = "key_down_refreshes"
++        case keyUpRefreshes = "key_up_refreshes"
++        case textRefreshes = "text_refreshes"
++        case preeditRefreshes = "preedit_refreshes"
++        case preeditSets = "preedit_sets"
++        case preeditClears = "preedit_clears"
++    }
++
++    private static let enabled = ProcessInfo.processInfo.environment["F7TTY_PROFILE"] == "1"
++    private(set) var snapshot: [String: Int] = [:]
++
++    mutating func record(_ counter: Counter) {
++        guard Self.enabled else { return }
++        let value = snapshot[counter.rawValue, default: 0]
++        if value < Int.max {
++            snapshot[counter.rawValue] = value + 1
++        }
++    }
++}
+ 
+ public enum GhosttyTerminalColorScheme: Sendable {
+     case light
+@@ -204,16 +251,22 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+     public private(set) var configDiagnostics: [GhosttyTerminalConfigDiagnostic] = []
+ 
      private var sessions: [ObjectIdentifier: WeakGhosttyTerminalSession] = [:]
++    private var profile = GhosttyTerminalProfileCounters()
      nonisolated(unsafe) private var observers: [NSObjectProtocol] = []
  
 -    public init(loadDefaultTheme: Bool = true) throws {
@@ -24,7 +80,24 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
              throw GhosttyTerminalHostError.configurationFailed
          }
  
-@@ -277,7 +282,7 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+@@ -257,9 +310,16 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+ 
+     public func tick() {
+         guard let app else { return }
++        profile.record(.hostTicks)
+         ghostty_app_tick(app)
+     }
+ 
++    /// Lifetime counts for this host only. Empty unless launched with
++    /// F7TTY_PROFILE=1. Missing keys are zero; reading does not reset counts.
++    public func profilingSnapshot() -> [String: Int] {
++        profile.snapshot
++    }
++
+     public func setColorScheme(_ colorScheme: GhosttyTerminalColorScheme, appearance: NSAppearance? = nil) {
+         guard let app, let scheme = resolvedColorScheme(colorScheme, appearance: appearance) else { return }
+         ghostty_app_set_color_scheme(app, scheme)
+@@ -277,7 +337,7 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
      }
  
      public func reloadConfig() {
@@ -33,7 +106,7 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
          let oldConfig = config
          config = newConfig
          configDiagnostics = Self.collectDiagnostics(from: newConfig)
-@@ -293,6 +298,10 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+@@ -293,6 +353,10 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
      }
  
      public func openConfig() {
@@ -44,7 +117,7 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
          let path = ghostty_config_open_path()
          defer { ghostty_string_free(path) }
          guard let pointer = path.ptr, path.len > 0 else { return }
-@@ -330,8 +339,13 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
+@@ -330,8 +394,13 @@ public final class GhosttyTerminalHost: GhosttyTerminalHostProtocol {
          ghostty_app_set_focus(app, focused)
      }
  
@@ -59,16 +132,24 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
          ghostty_config_load_default_files(config)
          ghostty_config_load_recursive_files(config)
          if loadDefaultTheme, ghosttyConfigDeclaresTheme() == false, let overrideURL = try? GhosttyDefaultTheme.ensureOverride() {
-@@ -366,6 +380,8 @@ public final class GhosttyTerminalSession {
+@@ -366,6 +435,16 @@ public final class GhosttyTerminalSession {
      public var notificationHandler: ((GhosttyTerminalNotification) -> Void)?
      public var requestHandler: ((GhosttyTerminalRequest) -> Void)?
      nonisolated(unsafe) private var secureEventInputEnabled = false
 +    private var closed = false
 +    private var lastPixelSize: CGSize = .zero
++    private var lastContentScale: CGSize?
++    private var lastColorScheme: ghostty_color_scheme_e?
++    private var lastFocused: Bool?
++    private var lastOccluded: Bool?
++    private var profile = GhosttyTerminalProfileCounters()
++
++    // Opt-in experiment only: normal rendering retains the synchronous draw API.
++    private static let asyncRedraw = ProcessInfo.processInfo.environment["F7TTY_ASYNC_REDRAW"] == "1"
  
      public init(
          host: any GhosttyTerminalHostProtocol = GhosttyTerminalHost.shared ?? (try! GhosttyTerminalHost()),
-@@ -394,6 +410,7 @@ public final class GhosttyTerminalSession {
+@@ -394,6 +473,7 @@ public final class GhosttyTerminalSession {
      }
  
      public func attach(to view: GhosttyTerminalView) {
@@ -76,28 +157,82 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
          self.view = view
          if view.handlers == nil {
              view.handlers = makeViewHandlers()
-@@ -449,7 +466,10 @@ public final class GhosttyTerminalSession {
+@@ -448,24 +528,93 @@ public final class GhosttyTerminalSession {
+     public func resize(to size: CGSize) {
          guard let surface else { return }
          guard size.width.isFinite, size.height.isFinite, size.width > 0, size.height > 0 else { return }
-         let scale = view?.window?.backingScaleFactor ?? view?.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
+-        let scale = view?.window?.backingScaleFactor ?? view?.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2
 -        ghostty_surface_set_size(surface, UInt32(ceil(size.width * scale)), UInt32(ceil(size.height * scale)))
-+        let pixels = CGSize(width: ceil(size.width * scale), height: ceil(size.height * scale))
-+        guard pixels != lastPixelSize else { return }
++        let scale = contentScale
++        let pixels = CGSize(width: ceil(size.width * scale.width), height: ceil(size.height * scale.height))
++        guard let width = UInt32(exactly: pixels.width), let height = UInt32(exactly: pixels.height), width > 0, height > 0 else { return }
++        guard pixels != lastPixelSize else {
++            profile.record(.resizeNoops)
++            return
++        }
 +        lastPixelSize = pixels
-+        ghostty_surface_set_size(surface, UInt32(pixels.width), UInt32(pixels.height))
++        profile.record(.effectiveResizes)
++        ghostty_surface_set_size(surface, width, height)
          ghostty_surface_refresh(surface)
      }
  
-@@ -461,10 +481,31 @@ public final class GhosttyTerminalSession {
+     public func updateContentScale() {
++        let scale = contentScale
++        guard scale.width.isFinite, scale.height.isFinite, scale.width > 0, scale.height > 0 else { return }
++        // Keep the compositor's scale synchronized even when the engine's scale
++        // is unchanged (for example after AppKit replaces the backing layer).
++        let layerScale = view?.window?.backingScaleFactor ?? scale.width
++        if let layer = view?.layer, layer.contentsScale != layerScale {
++            CATransaction.begin()
++            CATransaction.setDisableActions(true)
++            layer.contentsScale = layerScale
++            CATransaction.commit()
++            profile.record(.layerScaleChanges)
++        }
+         guard let surface else { return }
+-        let scale = Double(view?.window?.backingScaleFactor ?? view?.window?.screen?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 2)
+-        guard scale.isFinite, scale > 0 else { return }
+-        ghostty_surface_set_content_scale(surface, scale, scale)
++        guard lastContentScale != scale else {
++            profile.record(.contentScaleNoops)
++            return
++        }
++        lastContentScale = scale
++        profile.record(.contentScaleChanges)
++        ghostty_surface_set_content_scale(surface, Double(scale.width), Double(scale.height))
++    }
++
++    private var contentScale: CGSize {
++        if let view, view.window != nil {
++            // A unit size avoids division by zero while a pane is collapsed.
++            return view.convertToBacking(CGSize(width: 1, height: 1))
++        }
++        let scale = NSScreen.main?.backingScaleFactor ?? 2
++        return CGSize(width: scale, height: scale)
      }
  
      public func render() {
 -        guard let surface else { return }
+-        ghostty_surface_draw(surface)
 +        guard let surface, let view, !view.isHiddenOrHasHiddenAncestor,
 +              view.window?.occlusionState.contains(.visible) == true else { return }
-         ghostty_surface_draw(surface)
-     }
- 
++        if Self.asyncRedraw {
++            profile.record(.asyncRenderRefreshes)
++            ghostty_surface_refresh(surface)
++        } else {
++            profile.record(.surfaceDrawCalls)
++            ghostty_surface_draw(surface)
++        }
++    }
++
++    /// Lifetime counts for this session only, excluding its view and host.
++    /// Empty unless launched with F7TTY_PROFILE=1. Missing keys are zero.
++    /// Reading does not reset counts; initial size/scale/scheme applications count.
++    /// Draw counts measure wrapper API calls, not engine or GPU frame submissions.
++    public func profilingSnapshot() -> [String: Int] {
++        profile.snapshot
++    }
++
 +    public func close() {
 +        guard !closed else { return }
 +        closed = true
@@ -116,12 +251,117 @@ index 0390ef09ddcc6ad5b2d3fc19a6879825e5154a94..2a776d94144ca5eba36757e33cc5cd4e
 +            ghostty_surface_free(oldSurface)
 +        }
 +        host.unregister(self)
-+    }
-+
+     }
+ 
      public func requestRender() {
++        profile.record(.sessionRenderRequests)
          if let view {
              view.requestRender()
-@@ -966,10 +1007,11 @@ private func ghosttyKitAction(_ app: ghostty_app_t?, _ target: ghostty_target_s,
+         } else {
+@@ -475,11 +624,25 @@ public final class GhosttyTerminalSession {
+ 
+     public func setFocused(_ focused: Bool) {
+         guard let surface else { return }
++        // Ghostty uses every focus-true call to update the app's focused surface,
++        // even when the surface-local value is unchanged. Only repeated false is a no-op.
++        guard focused || lastFocused != focused else {
++            profile.record(.focusNoops)
++            return
++        }
++        lastFocused = focused
++        profile.record(.focusCalls)
+         ghostty_surface_set_focus(surface, focused)
+     }
+ 
+     public func setOccluded(_ occluded: Bool) {
+         guard let surface else { return }
++        guard lastOccluded != occluded else {
++            profile.record(.occlusionNoops)
++            return
++        }
++        lastOccluded = occluded
++        profile.record(.occlusionChanges)
+         ghostty_surface_set_occlusion(surface, !occluded)
+     }
+ 
+@@ -494,12 +657,18 @@ public final class GhosttyTerminalSession {
+     }
+ 
+     public func sendKeyDown(_ event: NSEvent, text: String?) {
++        guard let surface else { return }
+         sendKeyEvent(event, action: event.isARepeat ? GHOSTTY_ACTION_REPEAT : GHOSTTY_ACTION_PRESS, text: text)
++        profile.record(.keyDownRefreshes)
++        profile.record(.inputRefreshes)
+         ghostty_surface_refresh(surface)
+     }
+ 
+     public func sendKeyUp(_ event: NSEvent) {
++        guard let surface else { return }
+         sendKeyEvent(event, action: GHOSTTY_ACTION_RELEASE, text: nil)
++        profile.record(.keyUpRefreshes)
++        profile.record(.inputRefreshes)
+         ghostty_surface_refresh(surface)
+     }
+ 
+@@ -508,19 +677,19 @@ public final class GhosttyTerminalSession {
+         text.withCString { ptr in
+             ghostty_surface_text(surface, ptr, UInt(text.utf8.count))
+         }
++        profile.record(.textRefreshes)
++        profile.record(.inputRefreshes)
+         ghostty_surface_refresh(surface)
+     }
+ 
+     public func setMarkedText(_ text: String?) {
+         guard let surface else { return }
+-        guard let text else {
+-            ghostty_surface_preedit(surface, nil, 0)
+-            ghostty_surface_refresh(surface)
+-            return
+-        }
+-        text.withCString { ptr in
+-            ghostty_surface_preedit(surface, ptr, UInt(text.utf8.count))
++        profile.record(text?.isEmpty == false ? .preeditSets : .preeditClears)
++        text.withOptionalCString { pointer in
++            ghostty_surface_preedit(surface, pointer, UInt(text?.utf8.count ?? 0))
+         }
++        profile.record(.preeditRefreshes)
++        profile.record(.inputRefreshes)
+         ghostty_surface_refresh(surface)
+     }
+ 
+@@ -583,12 +752,21 @@ public final class GhosttyTerminalSession {
+     public func applyColorScheme(_ colorScheme: GhosttyTerminalColorScheme, appearance: NSAppearance? = nil) {
+         configuration.colorScheme = colorScheme
+         guard let surface, let scheme = resolvedColorScheme(colorScheme, appearance: appearance ?? view?.effectiveAppearance) else { return }
++        // The resolved scheme can be unchanged even when the preference changes.
++        guard lastColorScheme != scheme else {
++            profile.record(.colorSchemeNoops)
++            return
++        }
++        lastColorScheme = scheme
++        profile.record(.colorSchemeChanges)
+         ghostty_surface_set_color_scheme(surface, scheme)
+         ghostty_surface_refresh(surface)
+     }
+ 
+     public func updateConfig(_ config: ghostty_config_t) {
+         guard let surface else { return }
++        // Upstream preserves the surface's conditional theme and queues a render,
++        // so the resolved-scheme cache remains valid across config reloads.
+         ghostty_surface_update_config(surface, config)
+         state.configDiagnostics = host.configDiagnostics
+         applyColorScheme(configuration.colorScheme, appearance: view?.effectiveAppearance)
+@@ -746,6 +924,8 @@ public final class GhosttyTerminalSession {
+         }
+ 
+         if let surface, let scheme = resolvedColorScheme(configuration.colorScheme, appearance: view.effectiveAppearance) {
++            lastColorScheme = scheme
++            profile.record(.colorSchemeChanges)
+             ghostty_surface_set_color_scheme(surface, scheme)
+         }
+     }
+@@ -966,10 +1146,11 @@ private func ghosttyKitAction(_ app: ghostty_app_t?, _ target: ghostty_target_s,
      guard let app else { return false }
      guard let host = ghosttyKitHost(from: ghostty_app_userdata(app)) else { return false }
      let terminalAction = ghosttyTerminalAction(from: action)
