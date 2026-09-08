@@ -89,6 +89,8 @@ final class SidebarRowButton: NSButton, NSDraggingSource {
     private var dragOrigin: NSPoint?
     private var startedDrag = false
     private var dropAfter: Bool?
+    private var dropIntoWorkspace = false
+    var canAcceptSessionDrop: ((UUID) -> Bool)?
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
@@ -120,27 +122,37 @@ final class SidebarRowButton: NSButton, NSDraggingSource {
         context == .withinApplication ? .move : []
     }
     func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
-        dragOrigin = nil; startedDrag = false; dropAfter = nil; needsDisplay = true
+        dragOrigin = nil; startedDrag = false; clearSidebarDrop()
     }
     private func reorderSource(_ sender: NSDraggingInfo) -> UUID? {
         guard sender.draggingSource is SidebarRowButton,
               let value = sender.draggingPasteboard.string(forType: Self.reorderType) else { return nil }
         let parts = value.split(separator: ":")
-        guard parts.count == 2, parts[0] == (sessionRow ? "session" : "workspace"),
-              let id = UUID(uuidString: String(parts[1])), id != itemID else { return nil }
+        guard parts.count == 2,
+               let id = UUID(uuidString: String(parts[1])), id != itemID else { return nil }
+        if parts[0] == "session", !sessionRow {
+            return canAcceptSessionDrop?(id) == true ? id : nil
+        }
+        guard parts[0] == (sessionRow ? "session" : "workspace") else { return nil }
         return id
     }
     override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation { draggingUpdated(sender) }
     override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
-        guard onReorder != nil, reorderSource(sender) != nil else { dropAfter = nil; needsDisplay = true; return [] }
+        guard onReorder != nil, reorderSource(sender) != nil else { clearSidebarDrop(); return [] }
+        dropIntoWorkspace = !sessionRow && (sender.draggingSource as? SidebarRowButton)?.sessionRow == true
         let point = convert(sender.draggingLocation, from: nil)
         dropAfter = isFlipped ? point.y > bounds.midY : point.y < bounds.midY
         needsDisplay = true
         return .move
     }
-    override func draggingExited(_ sender: NSDraggingInfo?) { dropAfter = nil; needsDisplay = true }
+    private func clearSidebarDrop() {
+        dropAfter = nil
+        dropIntoWorkspace = false
+        needsDisplay = true
+    }
+    override func draggingExited(_ sender: NSDraggingInfo?) { clearSidebarDrop() }
     override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
-        defer { dropAfter = nil; needsDisplay = true }
+        defer { clearSidebarDrop() }
         guard let source = reorderSource(sender), let itemID, let dropAfter, let onReorder else { return false }
         onReorder(source, itemID, dropAfter)
         return true
@@ -205,7 +217,14 @@ final class SidebarRowButton: NSButton, NSDraggingSource {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        if let dropAfter {
+        if dropIntoWorkspace {
+            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 9, yRadius: 9)
+            NSColor.controlAccentColor.withAlphaComponent(0.18).setFill()
+            shape.fill()
+            NSColor.controlAccentColor.setStroke()
+            shape.lineWidth = 2
+            shape.stroke()
+        } else if let dropAfter {
             NSColor.secondaryLabelColor.setFill()
             let bottom = dropAfter != isFlipped
             NSRect(x: 8, y: bottom ? 0 : bounds.height - 2, width: max(0, bounds.width - 16), height: 2).fill()
@@ -1147,6 +1166,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             workspaceRow.action = #selector(selectWorkspaceFromRow(_:))
             workspaceRow.itemID = workspace.id
             workspaceRow.onReorder = { [weak self] source, target, after in self?.reorderSidebar(source: source, target: target, after: after) }
+            workspaceRow.canAcceptSessionDrop = { [weak self] id in
+                self?.model.workspaces.contains { $0.id != workspace.id && $0.sessions.contains { $0.id == id } } == true
+            }
             workspaceRow.onAdd = { [weak self] in
                 _ = self?.addSession(to: workspace.id, name: nil, select: true, persist: true)
             }
@@ -1211,6 +1233,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func reorderSidebar(source: UUID, target: UUID, after: Bool) {
         guard model.reorderSidebar(source: source, target: target, after: after) else { return }
+        if model.workspaces.contains(where: { $0.id == target && $0.sessions.contains(where: { $0.id == source }) }) {
+            collapsedWorkspaceIDs.remove(target)
+        }
         // No surface rebuild, reparent, focus change, shell restart or working-directory change.
         refreshSidebar()
         saveModel()
@@ -1521,10 +1546,28 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let menu = NSMenu()
         menu.autoenablesItems = false
         menu.addItem(contextItem("Rename session", action: #selector(renameSession(_:)), id: id))
+        let move = NSMenuItem(title: "Move to Workspace", action: nil, keyEquivalent: "")
+        let destinations = NSMenu()
+        destinations.autoenablesItems = false
+        for workspace in model.workspaces where !workspace.sessions.contains(where: { $0.id == id }) {
+            let item = NSMenuItem(title: workspace.name, action: #selector(moveSessionToWorkspace(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = [id, workspace.id]
+            item.toolTip = workspace.directory
+            destinations.addItem(item)
+        }
+        move.submenu = destinations
+        move.isEnabled = !destinations.items.isEmpty
+        menu.addItem(move)
         menu.addItem(contextItem("New session", action: #selector(newSessionFromMenu(_:)), id: id))
         menu.addItem(.separator())
         menu.addItem(contextItem("Close session", action: #selector(removeSession(_:)), id: id))
         return menu
+    }
+
+    @objc private func moveSessionToWorkspace(_ sender: NSMenuItem) {
+        guard let ids = sender.representedObject as? [UUID], ids.count == 2 else { return }
+        reorderSidebar(source: ids[0], target: ids[1], after: false)
     }
 
     private func contextItem(_ title: String, action: Selector, id: UUID) -> NSMenuItem {
@@ -2442,6 +2485,45 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     self.smokeFailed = self.smokeFailed || !preserved
                     print("SMOKE sidebar reorder preserves live surface and focus \(preserved ? "PASS" : "FAIL")")
                 }
+                let destination = Workspace(name: "Move destination", directory: "/", sessions: [])
+                self.model.workspaces.append(destination)
+                self.collapsedWorkspaceIDs.insert(destination.id)
+                self.refreshSidebar()
+                let responderBeforeTransfer = self.window.firstResponder
+                let layoutBeforeTransfer = self.paneTreeView
+                let sessionBeforeTransfer = self.selectedSession
+                let destinationRow = self.sidebarRows.arrangedSubviews.compactMap { $0 as? SidebarRowButton }
+                    .first { $0.itemID == destination.id }
+                let acceptsSession = destinationRow?.canAcceptSessionDrop?(splitSession.id) == true
+                self.reorderSidebar(source: splitSession.id, target: destination.id, after: false)
+                let transferPreserved = acceptsSession
+                    && self.selectedSession == sessionBeforeTransfer
+                    && self.model.selectedWorkspaceID == destination.id
+                    && !self.collapsedWorkspaceIDs.contains(destination.id)
+                    && self.paneTreeView === layoutBeforeTransfer
+                    && self.window.firstResponder === responderBeforeTransfer
+                    && self.panes[firstID]?.session === originalSession
+                    && self.panes[firstID]?.terminal === originalView
+                    && self.panes[secondID]?.terminal === secondPane.terminal
+                    && self.panes[firstID]?.container.isHidden == false
+                self.smokeFailed = self.smokeFailed || !transferPreserved
+                print("SMOKE workspace transfer preserves live splits and focus \(transferPreserved ? "PASS" : "FAIL")")
+                let movedState = self.model
+                let rejectsSameWorkspace = !self.model.reorderSidebar(source: splitSession.id, target: destination.id, after: false)
+                let rejectsUnknown = !self.model.reorderSidebar(source: splitSession.id, target: UUID(), after: false)
+                let roundTrip = (try? JSONEncoder().encode(self.model)).flatMap { try? JSONDecoder().decode(WorkspaceState.self, from: $0) }
+                let validTransfer = rejectsSameWorkspace && rejectsUnknown && self.model == movedState && roundTrip == movedState
+                self.smokeFailed = self.smokeFailed || !validTransfer
+                print("SMOKE workspace transfer validation and persistence \(validTransfer ? "PASS" : "FAIL")")
+                let moveMenu = self.sessionMenu(for: splitSession.id).items.first { $0.title == "Move to Workspace" }?.submenu
+                let returnItem = moveMenu?.items.first { ($0.representedObject as? [UUID]) == [splitSession.id, workspaceID] }
+                if let returnItem { self.moveSessionToWorkspace(returnItem) }
+                let returned = returnItem != nil && self.model.selectedWorkspaceID == workspaceID
+                    && self.selectedSession == sessionBeforeTransfer
+                    && self.window.firstResponder === responderBeforeTransfer
+                    && self.paneTreeView === layoutBeforeTransfer
+                self.smokeFailed = self.smokeFailed || !returned
+                print("SMOKE workspace move menu \(returned ? "PASS" : "FAIL")")
                 self.splitPane(terminalID: firstID, direction: .down)
                 self.finishSmokeTest()
             }

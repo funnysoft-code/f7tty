@@ -612,8 +612,14 @@ public struct WorkspaceState: Codable, Equatable, Sendable {
             return true
         }
         guard let from = workspaces.firstIndex(where: { $0.sessions.contains(where: { $0.id == source }) }),
-              let destination = workspaces.firstIndex(where: { $0.sessions.contains(where: { $0.id == target }) }),
               let index = workspaces[from].sessions.firstIndex(where: { $0.id == source }) else { return false }
+        if let destination = workspaces.firstIndex(where: { $0.id == target }), from != destination {
+            let moved = workspaces[from].sessions.remove(at: index)
+            workspaces[destination].sessions.append(moved)
+            if selectedSessionID == source { selectedWorkspaceID = target }
+            return true
+        }
+        guard let destination = workspaces.firstIndex(where: { $0.sessions.contains(where: { $0.id == target }) }) else { return false }
         let moved = workspaces[from].sessions.remove(at: index)
         let targetIndex = workspaces[destination].sessions.firstIndex(where: { $0.id == target })!
         workspaces[destination].sessions.insert(moved, at: targetIndex + (after ? 1 : 0))

@@ -134,6 +134,29 @@ final class WorkspaceModelTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(WorkspaceState.self, from: JSONEncoder().encode(state)), state)
     }
 
+    func testSessionMoveToWorkspacePreservesStateAndRejectsInvalidTargets() throws {
+        let session = WorkspaceSession(name: "Running", directory: "/tmp/original")
+        let other = WorkspaceSession(name: "Other", directory: "/tmp/other")
+        let source = Workspace(name: "Source", directory: "/tmp", sessions: [session, other])
+        let destination = Workspace(name: "Empty", directory: "/", sessions: [])
+        var state = WorkspaceState(workspaces: [source, destination], selectedWorkspaceID: source.id, selectedSessionID: session.id)
+        XCTAssertTrue(state.reorderSidebar(source: session.id, target: destination.id, after: false))
+        XCTAssertEqual(state.workspaces[0].sessions, [other])
+        XCTAssertEqual(state.workspaces[1].sessions, [session])
+        XCTAssertEqual(state.selectedWorkspaceID, destination.id)
+        XCTAssertEqual(state.selectedSessionID, session.id)
+        XCTAssertTrue(state.reorderSidebar(source: other.id, target: destination.id, after: false))
+        XCTAssertTrue(state.workspaces[0].sessions.isEmpty)
+        XCTAssertEqual(state.workspaces[1].sessions, [session, other])
+        XCTAssertEqual(state.selectedSessionID, session.id)
+        let before = state
+        XCTAssertFalse(state.reorderSidebar(source: session.id, target: destination.id, after: false))
+        XCTAssertFalse(state.reorderSidebar(source: session.id, target: UUID(), after: false))
+        XCTAssertEqual(state, before)
+        try state.validate()
+        XCTAssertEqual(try JSONDecoder().decode(WorkspaceState.self, from: JSONEncoder().encode(state)), state)
+    }
+
     func testAppearancePanelsResolveLayerColorsOnModeChanges() async {
         await MainActor.run {
             _ = NSApplication.shared
