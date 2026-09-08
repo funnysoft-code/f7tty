@@ -828,6 +828,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private var paneTopConstraint: NSLayoutConstraint?
     private var visibleTerminalIDs = Set<UUID>()
     private var collapsedWorkspaceIDs = Set<UUID>()
+    private var emptyWorkspaceIDs = Set<UUID>()
     private var backgroundOpacity: Double = 1
     private var appearanceMode = "dark"
     private var activity: [TerminalActivity] = []
@@ -1096,6 +1097,11 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     private func refreshSidebar() {
         PerformanceDiagnostics.record("sidebarRebuilds")
+        let emptyIDs = Set(model.workspaces.filter { $0.sessions.isEmpty }.map(\.id))
+        // Collapse newly empty folders, but preserve an explicit expansion until they change again.
+        collapsedWorkspaceIDs.formUnion(emptyIDs.subtracting(emptyWorkspaceIDs))
+        collapsedWorkspaceIDs.formIntersection(model.workspaces.map(\.id))
+        emptyWorkspaceIDs = emptyIDs
         let color = selectedWorkspace?.appColor.flatMap(WorkspaceColor.init(rawValue:)) ?? .standard
         for panel in [rootView, sidebar, canvas] {
             panel.darkFill = color.darkFill
@@ -1610,9 +1616,9 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = message
-        alert.addButton(withTitle: "Cancel")
-        alert.addButton(withTitle: action)
-        return alert.runModal() == .alertSecondButtonReturn
+        alert.addButton(withTitle: action).keyEquivalent = "\r"
+        alert.addButton(withTitle: "Cancel").keyEquivalent = "\u{1b}"
+        return alert.runModal() == .alertFirstButtonReturn
     }
 
     private func closeRuntime(for workspace: Workspace) {
@@ -1748,12 +1754,11 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if quitting { return .terminateNow }
         if !test && !PerformanceDiagnostics.benchmark && !panes.isEmpty {
-            let alert = NSAlert()
-            alert.messageText = "Quit F7TTY and stop all terminals?"
-            alert.informativeText = "Commands and jobs in these terminals will be terminated. Unsaved work may be lost."
-            alert.addButton(withTitle: "Cancel")
-            alert.addButton(withTitle: "Stop terminals and quit")
-            guard alert.runModal() == .alertSecondButtonReturn else { return .terminateCancel }
+            guard confirmDestructiveAction(
+                title: "Quit F7TTY and stop all terminals?",
+                message: "Commands and jobs in these terminals will be terminated. Unsaved work may be lost.",
+                action: "Stop terminals and quit"
+            ) else { return .terminateCancel }
         }
         quitting = true
         guard f7tty_stop_descendants() == 0 else {
