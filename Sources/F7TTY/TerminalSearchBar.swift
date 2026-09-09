@@ -21,7 +21,7 @@ final class TerminalSearchBar: NSView, NSTextFieldDelegate {
         super.init(frame: frame)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0.15, alpha: 1).cgColor
-        layer?.cornerRadius = 6
+        layer?.cornerRadius = 8
         field.placeholderString = "Find"
         field.font = .systemFont(ofSize: 12)
         field.isBordered = false

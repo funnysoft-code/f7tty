@@ -197,6 +197,16 @@ final class WorkspaceModelTests: XCTestCase {
         }
     }
 
+    func testUnpeelTokensClampSidebarAndKeepOpaqueFrameDarkerThanSurface() {
+        XCTAssertEqual(Theme.clampSidebarWidth(180), 220)
+        XCTAssertEqual(Theme.clampSidebarWidth(600), 520)
+        XCTAssertEqual(Theme.clampSidebarWidth(300), 300)
+        XCTAssertEqual(Theme.windowMinSize, NSSize(width: 800, height: 600))
+        XCTAssertLessThan(Theme.darkFrame.redComponent, Theme.darkSurface.redComponent)
+        XCTAssertEqual(Theme.contentCornerRadius, 10)
+        XCTAssertEqual(Theme.surfaceInset, 8)
+    }
+
     func testNewSessionNamesDoNotCollideAfterRemovalOrRename() {
         var workspace = Workspace(name: "Home", directory: "/tmp", sessions: [
             WorkspaceSession(name: "Terminal 1", directory: "/tmp"),

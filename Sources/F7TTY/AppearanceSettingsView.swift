@@ -16,10 +16,10 @@ final class AppearanceSettingsView: AppearancePanel {
         self.onAppearanceChange = onAppearanceChange
         super.init(frame: .zero)
         wantsLayer = true
-        darkFill = NSColor(white: 0.105, alpha: 1)
-        lightFill = NSColor(white: 0.985, alpha: 1)
+        darkFill = Theme.darkSurface
+        lightFill = Theme.lightSurface
         updateColors()
-        layer?.cornerRadius = 9
+        layer?.cornerRadius = Theme.contentCornerRadius
         layer?.borderWidth = 1
         layer?.borderColor = NSColor(white: 0.23, alpha: 1).cgColor
 

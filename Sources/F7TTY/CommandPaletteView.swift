@@ -37,10 +37,10 @@ final class CommandPaletteView: NSView, NSTextFieldDelegate, NSTableViewDataSour
         super.init(frame: .zero)
         let card = AppearancePanel()
         card.wantsLayer = true
-        card.darkFill = NSColor(white: 0.105, alpha: 1)
-        card.lightFill = NSColor(white: 0.985, alpha: 1)
+        card.darkFill = Theme.darkSurface
+        card.lightFill = Theme.lightSurface
         card.updateColors()
-        card.layer?.cornerRadius = 12
+        card.layer?.cornerRadius = Theme.overlayCornerRadius
         card.layer?.borderWidth = 1
         card.layer?.borderColor = NSColor(white: 0.25, alpha: 1).cgColor
         card.shadow = NSShadow()
@@ -52,7 +52,7 @@ final class CommandPaletteView: NSView, NSTextFieldDelegate, NSTableViewDataSour
 
         field.placeholderString = "Search sessions, projects, commands…"
         field.setAccessibilityLabel("Search sessions, projects, commands")
-        field.font = .systemFont(ofSize: 13)
+        field.font = .systemFont(ofSize: 16)
         field.isBordered = false
         field.drawsBackground = false
         field.focusRingType = .none

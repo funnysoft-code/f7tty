@@ -2,7 +2,7 @@ import AppKit
 import GhosttyKit
 import ProcessOwnership
 
-let charcoal = NSColor(white: 0.105, alpha: 1)
+let charcoal = Theme.darkSurface
 
 enum Assets {
     static let bundle: Bundle = {
@@ -38,7 +38,7 @@ final class ActionButton: NSButton {
     override func draw(_ dirtyRect: NSRect) {
         if isEnabled && (hovered || isHighlighted) {
             NSColor.white.withAlphaComponent(isHighlighted ? 0.14 : 0.07).setFill()
-            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 5, yRadius: 5).fill()
+            NSBezierPath(roundedRect: bounds.insetBy(dx: 1, dy: 1), xRadius: 6, yRadius: 6).fill()
         }
         super.draw(dirtyRect)
     }
@@ -57,7 +57,7 @@ final class ActionButton: NSButton {
         contentTintColor = .secondaryLabelColor
         toolTip = title
         if let symbol {
-            image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+            image = ChromeIcons.image(ChromeIcons.mappedName(symbol), size: 16)
             imagePosition = .imageOnly
         }
         setAccessibilityLabel(title)
@@ -71,6 +71,21 @@ final class ActionButton: NSButton {
 @MainActor
 final class SidebarDocumentView: NSView {
     override var isFlipped: Bool { true }
+}
+
+@MainActor
+final class SidebarResizeHandle: NSView {
+    var onDrag: ((CGFloat) -> Void)?
+    private var startX: CGFloat = 0
+    private var startWidth: CGFloat = 0
+    override func resetCursorRects() { addCursorRect(bounds, cursor: .resizeLeftRight) }
+    override func mouseDown(with event: NSEvent) {
+        startX = event.locationInWindow.x
+        startWidth = superview?.bounds.width ?? Theme.sidebarDefaultWidth
+    }
+    override func mouseDragged(with event: NSEvent) {
+        onDrag?(startWidth + event.locationInWindow.x - startX)
+    }
 }
 
 /// The workspace chrome is continuous; only terminal cards draw a separating border.
@@ -230,14 +245,9 @@ final class SidebarRowButton: NSButton, NSDraggingSource {
             NSRect(x: 8, y: bottom ? 0 : bounds.height - 2, width: max(0, bounds.width - 16), height: 2).fill()
         }
         if selectedRow || hovered {
-            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: 9, yRadius: 9)
-            NSColor.white.withAlphaComponent(selectedRow ? 0.21 : 0.045).setFill()
+            let shape = NSBezierPath(roundedRect: bounds.insetBy(dx: 0.5, dy: 0.5), xRadius: Theme.rowCornerRadius, yRadius: Theme.rowCornerRadius)
+            Theme.selectedFill(dark: true).withAlphaComponent(selectedRow ? 0.16 : 0.10).setFill()
             shape.fill()
-            if selectedRow {
-                NSColor.white.withAlphaComponent(0.23).setStroke()
-                shape.lineWidth = 0.75
-                shape.stroke()
-            }
         }
         let paragraph = NSMutableParagraphStyle()
         paragraph.lineBreakMode = .byTruncatingTail
@@ -267,6 +277,7 @@ final class PaneHeaderView: NSView, NSDraggingSource {
     let terminalID: UUID
     var onDragStarted: ((UUID) -> Void)?
     var onClick: (() -> Void)?
+    var onMenu: (() -> Void)?
     private var dragStartPoint: NSPoint?
     private var didStartDrag = false
 
@@ -275,6 +286,7 @@ final class PaneHeaderView: NSView, NSDraggingSource {
         super.init(frame: .zero)
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
+        setAccessibilityLabel("Pane")
     }
 
     @available(*, unavailable)
@@ -315,6 +327,10 @@ final class PaneHeaderView: NSView, NSDraggingSource {
         if !didStartDrag { onClick?() }
         dragStartPoint = nil
         didStartDrag = false
+    }
+
+    override func rightMouseDown(with event: NSEvent) {
+        onMenu?()
     }
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
@@ -493,8 +509,8 @@ final class Pane {
         container.wantsLayer = true
         // Terminal configuration is independently dark; keep its chrome legible.
         container.appearance = NSAppearance(named: .darkAqua)
-        container.layer?.backgroundColor = NSColor.black.cgColor
-        container.layer?.cornerRadius = PerformanceDiagnostics.experiment("F7TTY_SQUARE_PANES") ? 0 : 9
+        container.layer?.backgroundColor = Theme.darkSurface.cgColor
+        container.layer?.cornerRadius = PerformanceDiagnostics.experiment("F7TTY_SQUARE_PANES") ? 0 : Theme.contentCornerRadius
         container.layer?.borderWidth = 1
         container.layer?.borderColor = NSColor(white: 0.2, alpha: 1).cgColor
         container.layer?.masksToBounds = !PerformanceDiagnostics.experiment("F7TTY_SQUARE_PANES")
@@ -507,15 +523,12 @@ final class Pane {
         title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         title.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
-        let icon = NSImageView(image: NSImage(systemSymbolName: "terminal", accessibilityDescription: "Terminal")!)
+        let icon = NSImageView(image: ChromeIcons.image("terminal", size: 13))
         icon.contentTintColor = .secondaryLabelColor
         icon.setContentHuggingPriority(.required, for: .horizontal)
-        let splitRight = ActionButton("Split right", symbol: "rectangle.split.2x1") { onSplit(.right) }
-        let splitDown = ActionButton("Split below", symbol: "rectangle.split.1x2") { onSplit(.down) }
-        let zoom = ActionButton("Maximize pane", symbol: "arrow.up.left.and.arrow.down.right") { onZoom() }
-        zoomButton = zoom
-        let more = ActionButton("Pane actions", symbol: "ellipsis") { onMenu() }
-        let headerStack = NSStackView(views: [icon, title, splitRight, splitDown, zoom, more])
+        zoomButton = ActionButton("Maximize pane", action: onZoom)
+        zoomButton.isHidden = true
+        let headerStack = NSStackView(views: [icon, title])
         headerStack.orientation = .horizontal
         headerStack.distribution = .fill
         headerStack.alignment = .centerY
@@ -547,6 +560,7 @@ final class Pane {
         }
         header.onDragStarted = { _ in onFocus() }
         header.onClick = onFocus
+        header.onMenu = onMenu
 
         if var handlers = terminal.handlers {
             handlers.primaryInteraction = onFocus
@@ -668,7 +682,7 @@ final class Pane {
         let label = zoomed ? "Restore pane layout" : "Maximize pane"
         zoomButton.toolTip = label
         zoomButton.setAccessibilityLabel(label)
-        zoomButton.image = NSImage(systemSymbolName: zoomed ? "arrow.down.right.and.arrow.up.left" : "arrow.up.left.and.arrow.down.right", accessibilityDescription: label)
+        zoomButton.toolTip = label
     }
 
     func requestFocus() {
@@ -947,13 +961,13 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         window.title = "F7TTY"
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
-        window.backgroundColor = NSColor(white: 0.075, alpha: 1)
-        window.minSize = NSSize(width: 650, height: 400)
+        window.backgroundColor = Theme.darkFrame
+        window.minSize = Theme.windowMinSize
         window.delegate = self
         window.isReleasedWhenClosed = false
 
         rootView.wantsLayer = true
-        rootView.layer?.backgroundColor = NSColor(white: 0.075, alpha: 1).cgColor
+        rootView.layer?.backgroundColor = Theme.darkFrame.cgColor
         body.isVertical = true
         body.dividerStyle = .thin
         body.translatesAutoresizingMaskIntoConstraints = false
@@ -962,15 +976,15 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         body.addArrangedSubview(sidebar)
         body.addArrangedSubview(canvas)
         rootView.addSubview(body)
-        let sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: 300)
+        let storedWidth = UserDefaults.standard.object(forKey: "sidebarWidth") as? Double
+        let sidebarWidth = sidebar.widthAnchor.constraint(equalToConstant: Theme.clampSidebarWidth(storedWidth.map { CGFloat($0) } ?? Theme.sidebarDefaultWidth))
         sidebarWidthConstraint = sidebarWidth
         NSLayoutConstraint.activate([
             body.leadingAnchor.constraint(equalTo: rootView.leadingAnchor),
             body.trailingAnchor.constraint(equalTo: rootView.trailingAnchor),
             body.topAnchor.constraint(equalTo: rootView.topAnchor),
             body.bottomAnchor.constraint(equalTo: rootView.bottomAnchor),
-            sidebarWidth,
-            canvas.widthAnchor.constraint(greaterThanOrEqualToConstant: 300)
+            sidebarWidth
         ])
 
         configureSidebar()
@@ -981,13 +995,13 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         toggle.translatesAutoresizingMaskIntoConstraints = false
         toggle.wantsLayer = true
         toggle.layer?.backgroundColor = NSColor.clear.cgColor
-        toggle.layer?.cornerRadius = 5
+        toggle.layer?.cornerRadius = 6
         rootView.addSubview(toggle)
         NSLayoutConstraint.activate([
-            toggle.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 86),
-            toggle.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 4),
-            toggle.widthAnchor.constraint(equalToConstant: 29),
-            toggle.heightAnchor.constraint(equalToConstant: 25)
+            toggle.leadingAnchor.constraint(equalTo: rootView.leadingAnchor, constant: 80),
+            toggle.topAnchor.constraint(equalTo: rootView.topAnchor, constant: 5),
+            toggle.widthAnchor.constraint(equalToConstant: 28),
+            toggle.heightAnchor.constraint(equalToConstant: 28)
         ])
         window.contentView = rootView
         let bell = ActionButton("Recent activity", symbol: "bell") { [weak self] in self?.showActivity() }
@@ -998,13 +1012,13 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             bell.leadingAnchor.constraint(equalTo: toggle.trailingAnchor, constant: 2),
             bell.centerYAnchor.constraint(equalTo: toggle.centerYAnchor),
             bell.widthAnchor.constraint(equalToConstant: 28),
-            bell.heightAnchor.constraint(equalToConstant: 25)
+            bell.heightAnchor.constraint(equalToConstant: 28)
         ])
     }
 
     private func configureSidebar() {
         sidebar.wantsLayer = true
-        sidebar.layer?.backgroundColor = NSColor(red: 0.064, green: 0.068, blue: 0.072, alpha: 1).cgColor
+        sidebar.layer?.backgroundColor = Theme.darkFrame.cgColor
         let heading = NSTextField(labelWithString: "")
         heading.font = .systemFont(ofSize: 10, weight: .semibold)
         heading.textColor = NSColor(white: 0.48, alpha: 1)
@@ -1057,15 +1071,36 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             footer.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor, constant: -8),
             footer.heightAnchor.constraint(equalToConstant: 28)
         ])
+        let handle = SidebarResizeHandle()
+        handle.translatesAutoresizingMaskIntoConstraints = false
+        handle.onDrag = { [weak self] width in self?.setSidebarWidth(width) }
+        handle.setAccessibilityLabel("Resize sidebar")
+        handle.setAccessibilityRole(.splitter)
+        sidebar.addSubview(handle)
+        NSLayoutConstraint.activate([
+            handle.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor),
+            handle.topAnchor.constraint(equalTo: sidebar.topAnchor),
+            handle.bottomAnchor.constraint(equalTo: sidebar.bottomAnchor),
+            handle.widthAnchor.constraint(equalToConstant: 8)
+        ])
+    }
+
+    private func setSidebarWidth(_ width: CGFloat) {
+        let clamped = Theme.clampSidebarWidth(width)
+        ChromeMotion.withoutImplicitAnimation {
+            sidebarWidthConstraint?.constant = clamped
+            body.layoutSubtreeIfNeeded()
+        }
+        if !test && !preview { UserDefaults.standard.set(Double(clamped), forKey: "sidebarWidth") }
     }
 
     private func configureCanvas() {
         canvas.wantsLayer = true
-        canvas.layer?.backgroundColor = NSColor(red: 0.064, green: 0.068, blue: 0.072, alpha: 1).cgColor
-        emptyState.darkFill = NSColor(white: 0.105, alpha: 1)
-        emptyState.lightFill = NSColor(white: 0.97, alpha: 1)
+        canvas.layer?.backgroundColor = Theme.darkFrame.cgColor
+        emptyState.darkFill = Theme.darkSurface
+        emptyState.lightFill = Theme.lightSurface
         emptyState.updateColors()
-        emptyState.layer?.cornerRadius = 9
+        emptyState.layer?.cornerRadius = Theme.contentCornerRadius
         emptyState.layer?.borderWidth = 1
         emptyState.layer?.borderColor = NSColor(white: 0.23, alpha: 1).cgColor
         emptyState.translatesAutoresizingMaskIntoConstraints = false
@@ -1081,11 +1116,11 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         message.font = .systemFont(ofSize: 14, weight: .medium)
         message.textColor = .secondaryLabelColor
         let guidance = NSTextField(wrappingLabelWithString: "Pick a session in the sidebar, or hit + on a project")
-        guidance.font = .systemFont(ofSize: 12)
+        guidance.font = .systemFont(ofSize: 11)
         guidance.textColor = .tertiaryLabelColor
         guidance.alignment = .center
         let version = NSTextField(labelWithString: "v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.3")")
-        version.font = .systemFont(ofSize: 11, weight: .medium)
+        version.font = .systemFont(ofSize: 10, weight: .medium)
         version.textColor = .tertiaryLabelColor
         [mark, message, guidance, version].forEach { stack.addArrangedSubview($0) }
         stack.setCustomSpacing(20, after: guidance)
@@ -1141,7 +1176,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             sidebarRows.addArrangedSubview(back)
             let appearance = SidebarRowButton(frame: .zero)
             appearance.title = "Appearance"
-            appearance.image = NSImage(systemSymbolName: "paintpalette", accessibilityDescription: nil)
+            appearance.image = ChromeIcons.image("gear", size: 14)
             appearance.selectedRow = true
             appearance.isBordered = false
             appearance.translatesAutoresizingMaskIntoConstraints = false
@@ -1156,7 +1191,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
             let workspaceRow = SidebarRowButton(frame: .zero)
             workspaceRow.title = workspace.name
             workspaceRow.toolTip = collapsedWorkspaceIDs.contains(workspace.id) ? "Expand folder" : "Collapse folder"
-            workspaceRow.image = NSImage(systemSymbolName: collapsedWorkspaceIDs.contains(workspace.id) ? "folder.fill" : "folder", accessibilityDescription: "Workspace")
+            workspaceRow.image = ChromeIcons.image("folder", size: 16)
             workspaceRow.imagePosition = .imageLeading
             workspaceRow.alignment = .left
             workspaceRow.font = .systemFont(ofSize: 13)
@@ -1208,7 +1243,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                     guard let self else { return }
                     self.removeSession(self.contextItem("Remove session", action: #selector(self.removeSession(_:)), id: session.id))
                 }
-                row.image = NSImage(systemSymbolName: session.tree.leafCount > 1 ? "rectangle.split.2x1" : "terminal", accessibilityDescription: "Session")
+                row.image = ChromeIcons.image(session.tree.leafCount > 1 ? "split" : "terminal", size: 14)
                 row.imagePosition = .imageLeading
                 row.alignment = .left
                 row.font = .systemFont(ofSize: 13)
@@ -1304,8 +1339,8 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
     private func addPaneContentToCanvas(_ view: NSView) {
         view.translatesAutoresizingMaskIntoConstraints = false
         canvas.addSubview(view)
-        paneLeadingConstraint = view.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: sidebarVisible ? 0 : 8)
-        paneTopConstraint = view.topAnchor.constraint(equalTo: canvas.topAnchor, constant: sidebarVisible ? 8 : 38)
+        paneLeadingConstraint = view.leadingAnchor.constraint(equalTo: canvas.leadingAnchor, constant: sidebarVisible ? 0 : Theme.surfaceInset)
+        paneTopConstraint = view.topAnchor.constraint(equalTo: canvas.topAnchor, constant: Theme.surfaceInset)
         NSLayoutConstraint.activate([
             paneLeadingConstraint!,
             view.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
@@ -1348,7 +1383,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
                 self.activity.insert(event, at: 0)
                 self.activity = Array(self.activity.prefix(50))
                 if self.activityPopover?.isShown == true { self.activityController?.events = self.activity }
-                self.activityButton?.image = NSImage(systemSymbolName: "bell.badge", accessibilityDescription: "Recent activity")
+                self.activityButton?.image = ChromeIcons.image("bell", size: 16)
             }
             panes[terminalID]?.session.closeHandler = { [weak self] processAlive in
                 guard let pane = self?.panes[terminalID] else { return }
@@ -1736,14 +1771,17 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
 
     @objc private func toggleSidebar() {
         sidebarVisible.toggle()
-        sidebar.isHidden = !sidebarVisible
-        sidebarWidthConstraint?.isActive = sidebarVisible
-        body.adjustSubviews()
-        settingsTopConstraint?.constant = sidebarVisible ? 8 : 38
-        paneLeadingConstraint?.constant = sidebarVisible ? 0 : 8
-        paneTopConstraint?.constant = sidebarVisible ? 8 : 38
-        emptyLeadingConstraint?.constant = sidebarVisible ? 0 : 8
-        emptyTopConstraint?.constant = sidebarVisible ? 8 : 38
+        let leading = sidebarVisible ? 0 : Theme.surfaceInset
+        ChromeMotion.withoutImplicitAnimation {
+            sidebar.isHidden = !sidebarVisible
+            sidebarWidthConstraint?.isActive = sidebarVisible
+            body.adjustSubviews()
+            settingsTopConstraint?.constant = Theme.surfaceInset
+            paneLeadingConstraint?.constant = leading
+            paneTopConstraint?.constant = Theme.surfaceInset
+            emptyLeadingConstraint?.constant = leading
+            emptyTopConstraint?.constant = Theme.surfaceInset
+        }
     }
 
     private func showPaneMenu(for terminalID: UUID) {
@@ -2067,7 +2105,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         activityPopover = popover
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .maxY)
         controller.view.window?.makeFirstResponder(controller.view)
-        button.image = NSImage(systemSymbolName: "bell", accessibilityDescription: "Recent activity")
+        button.image = ChromeIcons.image("bell", size: 16)
     }
 
     @objc private func showSettings() {
@@ -2091,7 +2129,7 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         renderSelectedSession()
         view.translatesAutoresizingMaskIntoConstraints = false
         canvas.addSubview(view)
-        settingsTopConstraint = view.topAnchor.constraint(equalTo: canvas.topAnchor, constant: sidebarVisible ? 8 : 38)
+        settingsTopConstraint = view.topAnchor.constraint(equalTo: canvas.topAnchor, constant: Theme.surfaceInset)
         NSLayoutConstraint.activate([
             view.leadingAnchor.constraint(equalTo: canvas.leadingAnchor),
             view.trailingAnchor.constraint(equalTo: canvas.trailingAnchor, constant: -8),
@@ -2166,8 +2204,8 @@ final class F7TTYAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate,
         if translucent && backgroundBlur == nil {
             let blur = NSVisualEffectView(frame: rootView.bounds)
             blur.autoresizingMask = [.width, .height]
-            blur.material = .underWindowBackground
-            blur.blendingMode = .behindWindow
+            blur.material = .hudWindow
+            blur.blendingMode = .withinWindow
             blur.state = .active
             rootView.addSubview(blur, positioned: .below, relativeTo: body)
             backgroundBlur = blur
