@@ -3,8 +3,8 @@ import AppKit
 /// Resolves layer colors again when macOS appearance changes, including System mode.
 @MainActor
 class AppearancePanel: NSView {
-    var darkFill = NSColor(red: 0.064, green: 0.068, blue: 0.072, alpha: 1)
-    var lightFill = NSColor(white: 0.94, alpha: 1)
+    var darkFill = Theme.darkFrame
+    var lightFill = Theme.lightFrame
     var fillOpacity: CGFloat = 1 { didSet { if oldValue != fillOpacity { updateColors() } } }
     override var isOpaque: Bool { fillOpacity == 1 && (layer?.cornerRadius ?? 0) == 0 }
     override func viewDidChangeEffectiveAppearance() {

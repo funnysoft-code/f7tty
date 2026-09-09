@@ -23,11 +23,11 @@ enum WorkspaceColor: String, CaseIterable {
 
     var darkFill: NSColor {
         // Keep the owner-approved default unchanged.
-        self == .standard ? NSColor(red: 0.064, green: 0.068, blue: 0.072, alpha: 1) : NSColor(calibratedHue: hue, saturation: 0.28, brightness: 0.12, alpha: 1)
+        self == .standard ? Theme.darkFrame : NSColor(calibratedHue: hue, saturation: 0.28, brightness: 0.12, alpha: 1)
     }
 
     var lightFill: NSColor {
-        self == .standard ? NSColor(white: 0.94, alpha: 1) : NSColor(calibratedHue: hue, saturation: 0.045, brightness: 0.97, alpha: 1)
+        self == .standard ? Theme.lightFrame : NSColor(calibratedHue: hue, saturation: 0.045, brightness: 0.97, alpha: 1)
     }
 }
 
